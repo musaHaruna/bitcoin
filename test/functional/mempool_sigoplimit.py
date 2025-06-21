@@ -132,8 +132,16 @@ class BytesPerSigOpTest(BitcoinTestFramework):
         assert_equal(entry_parent['ancestorcount'], 1)
         assert_equal(entry_parent['ancestorsize'], parent_tx.get_vsize())
         assert_equal(entry_parent['descendantcount'], 2)
-        assert_equal(entry_parent['descendantsize'], parent_tx.get_vsize() + sigop_equivalent_vsize)    
+        assert_equal(entry_parent['descendantsize'], parent_tx.get_vsize() + sigop_equivalent_vsize) 
         
+        tx_hex = tx.serialize().hex()
+        txid   = tx.txid_hex
+        self.log.info(f"Pushing padded tx {txid} into mempool for getrawtransaction sigopsize field check")
+        self.nodes[0].sendrawtransaction(hexstring=tx_hex, maxburnamount='1.0')
+        # Fetch with verbosity=1 and assert sigopsize is present and correct
+        raw = self.nodes[0].getrawtransaction(txid, 1)
+        assert 'sigopsize' in raw, "sigopsize field missing in getrawtransaction output"   
+
     def test_sigops_package(self):
         self.log.info("Test a overly-large sigops-vbyte hits package limits")
         # Make a 2-transaction package which fails vbyte checks even though

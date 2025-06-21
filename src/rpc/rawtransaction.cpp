@@ -281,6 +281,7 @@ static RPCHelpMan getrawtransaction()
                          {
                              {RPCResult::Type::BOOL, "in_active_chain", /*optional=*/true, "Whether specified block is in the active chain or not (only present with explicit \"blockhash\" argument)"},
                              {RPCResult::Type::STR_HEX, "blockhash", /*optional=*/true, "the block hash"},
+                             {RPCResult::Type::NUM, "sigopsize", /*optional=*/true, "Sigop-equivalent size in bytes, present for mempool transactions with non-default virtual size due to sigops."},
                              {RPCResult::Type::NUM, "confirmations", /*optional=*/true, "The confirmations"},
                              {RPCResult::Type::NUM_TIME, "blocktime", /*optional=*/true, "The block time expressed in " + UNIX_EPOCH_TIME},
                              {RPCResult::Type::NUM, "time", /*optional=*/true, "Same as \"blocktime\""},
@@ -381,6 +382,24 @@ static RPCHelpMan getrawtransaction()
         LOCK(cs_main);
         blockindex = chainman.m_blockman.LookupBlockIndex(hash_block); // May be nullptr for mempool transactions
     }
+
+    bool fromMempool = (blockindex == nullptr && hash_block.IsNull());
+        if (fromMempool && node.mempool) {
+        LOCK(node.mempool->cs);
+        if (auto entry = node.mempool->GetEntry(Txid::FromUint256(hash))) {
+            // Compute base size and virtual size
+            const size_t txSize = entry->GetTxSize();
+            const size_t vSize = GetVirtualTransactionSize(txSize, 0, 0);
+            // Only report sigopsize when vSize is strictly less than the raw tx size
+            if (vSize < txSize) {
+            // bytes per sigop = witness scale factor (4)
+            const uint64_t sigopSize = uint64_t(entry->GetSigOpCost()) * uint64_t(nBytesPerSigOp);
+            result.pushKV("sigopsize", sigopSize);
+            }
+        }
+    }
+    
+
     if (verbosity == 1) {
         TxToJSON(*tx, hash_block, result, chainman.ActiveChainstate());
         return result;
