@@ -97,8 +97,8 @@ class BytesPerSigOpTest(BitcoinTestFramework):
         tx.vout[0].scriptPubKey = CScript([OP_RETURN, b'X'*(256+vsize_to_pad+1)])
         res = self.nodes[0].testmempoolaccept([tx.serialize().hex()])[0]
         assert_equal(res['allowed'], True)
-        assert_equal(res['vsize'], sigop_equivalent_vsize+1)
-
+        assert_equal(res['vsize'], sigop_equivalent_vsize + 1)
+        assert_equal(res['vsize_bip141'], tx.get_vsize())
         # decrease the tx's vsize to be right below the sigop-limit equivalent size
         # => tx's vsize in mempool should stick at the sigop-limit equivalent
         # bytes level, as it is higher than the tx's serialized vsize
@@ -107,6 +107,7 @@ class BytesPerSigOpTest(BitcoinTestFramework):
         res = self.nodes[0].testmempoolaccept([tx.serialize().hex()])[0]
         assert_equal(res['allowed'], True)
         assert_equal(res['vsize'], sigop_equivalent_vsize)
+        assert_equal(res['vsize_bip141'], tx.get_vsize())
 
         # check that the ancestor and descendant size calculations in the mempool
         # also use the same max(sigop_equivalent_vsize, serialized_vsize) logic
@@ -131,8 +132,8 @@ class BytesPerSigOpTest(BitcoinTestFramework):
         assert_equal(entry_parent['ancestorcount'], 1)
         assert_equal(entry_parent['ancestorsize'], parent_tx.get_vsize())
         assert_equal(entry_parent['descendantcount'], 2)
-        assert_equal(entry_parent['descendantsize'], parent_tx.get_vsize() + sigop_equivalent_vsize)
-
+        assert_equal(entry_parent['descendantsize'], parent_tx.get_vsize() + sigop_equivalent_vsize)    
+        
     def test_sigops_package(self):
         self.log.info("Test a overly-large sigops-vbyte hits package limits")
         # Make a 2-transaction package which fails vbyte checks even though
