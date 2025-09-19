@@ -19,6 +19,7 @@
 #include <util/fs.h>
 #include <util/time.h>
 #include <util/translation.h>
+#include <wallet/receive.h>
 #include <wallet/rpc/util.h>
 #include <wallet/wallet.h>
 
@@ -34,6 +35,96 @@
 using interfaces::FoundBlock;
 
 namespace wallet {
+static UniValue AddUTXOMatchedResult(UniValue& response, int scanned_chunks)
+{
+    std::vector<UniValue> results = response.getValues();
+    response.clear();
+    response.setArray();
+
+    for (const UniValue& r : results) {
+        UniValue item = r;
+        bool is_success = false;
+        if (item.exists("success") && item["success"].isBool()) {
+            is_success = item["success"].get_bool();
+        } else {
+            is_success = true;
+            item.pushKV("success", UniValue(true));
+        }
+
+        if (is_success) {
+            UniValue info(UniValue::VOBJ);
+            info.pushKV("utxo_check", UniValue(true));
+            info.pushKV("scanned_chunks", scanned_chunks);
+            info.pushKV("scanned_blocks", int64_t(scanned_chunks) * /*chunk_blocks*/ 1000);
+            item.pushKV("info", info);
+        }
+
+        response.push_back(item);
+    }
+
+    return response;
+}
+
+static UniValue IncrementalRescansNonOverlap(CWallet& wallet, int64_t tip_time, int tip_height, int chunk_blocks, int64_t avg_block_time, bool have_prune_boundary, int64_t min_trial_start_time,
+                                            const CAmount utxo_target, WalletRescanReserver& reserver, UniValue& response, int& out_chunks_tried, int64_t& out_lowest_timestamp)
+{
+    out_chunks_tried = 0;
+    out_lowest_timestamp = 0;
+
+    int64_t prev_window_start_time = tip_time;
+    int window_index = 1;
+
+    while (true) {
+        ++out_chunks_tried;
+
+        int64_t trial_start_time = (tip_time > int64_t(window_index) * chunk_blocks * avg_block_time)
+            ? tip_time - int64_t(window_index) * chunk_blocks * avg_block_time
+            : 0;
+        int64_t trial_end_time = prev_window_start_time; // non-overlapping
+
+        if (have_prune_boundary && trial_start_time < min_trial_start_time) {
+            trial_start_time = min_trial_start_time;
+        }
+
+        // If we've already reached the boundary and there's nothing new to scan, break.
+        if (window_index > 1 && trial_start_time == prev_window_start_time) {
+            break;
+        }
+
+        // Perform rescan for the window [trial_start_time, trial_end_time)
+        int64_t scanned_time = wallet.RescanFromTime(trial_start_time, reserver, /*update=*/true, /*endTime=*/std::optional<int64_t>(trial_end_time));
+
+        if (wallet.IsAbortingRescan()) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted by user.");
+        }
+
+        // If scanned_time > trial_start_time, we failed to read some blocks in that window.
+        if (scanned_time > trial_start_time) {
+            // Record fallback time and return empty to let caller handle fallback/rescan composition.
+            out_lowest_timestamp = trial_start_time;
+            return UniValue();
+        }
+
+        // Recompute wallet trusted balance after this rescan
+        const auto new_bal = GetBalance(wallet);
+        const CAmount current_trusted = new_bal.m_mine_trusted;
+
+        if (current_trusted == utxo_target) {
+            return AddUTXOMatchedResult(response, out_chunks_tried);
+        }
+
+        prev_window_start_time = trial_start_time;
+
+        // If we've hit genesis (0) or prune boundary, stop further incremental attempts.
+        if ((trial_start_time == 0) || (have_prune_boundary && trial_start_time == min_trial_start_time)) {
+            break;
+        }
+
+        ++window_index;
+    }
+    return UniValue();
+}
+
 RPCHelpMan importprunedfunds()
 {
     return RPCHelpMan{
@@ -377,6 +468,12 @@ RPCHelpMan importdescriptors()
     const int64_t minimum_timestamp = 1;
     int64_t now = 0;
     int64_t lowest_timestamp = 0;
+
+    bool do_scan_utxoset = false;
+    if (main_request.params.size() > 1 && !main_request.params[1].isNull()) {
+        do_scan_utxoset = main_request.params[1].get_bool();
+    }
+
     bool rescan = false;
     UniValue response(UniValue::VARR);
     {
@@ -401,8 +498,74 @@ RPCHelpMan importdescriptors()
                 rescan = true;
             }
         }
+
         pwallet->ConnectScriptPubKeyManNotifiers();
         pwallet->RefreshAllTXOs();
+    }
+
+    bool have_prune_boundary = false;
+    int64_t min_trial_start_time = 0;
+
+    if (!rescan) {
+        return response;
+    }
+
+    UniValue utxo_diff_obj;
+
+    if (do_scan_utxoset && rescan) {
+        // Compare wallet trusted balance with chainstate-scanned spendable balance.
+        const auto bal = GetBalance(wallet);
+
+        CAmount utxo_scanned_balance = GetWalletUTXOSetBalance(wallet);
+
+        if (utxo_scanned_balance != bal.m_mine_trusted) {
+            // Incremental-rescan chunking parameters
+            const int chunk_blocks = 1000;
+            const int64_t avg_block_time = 600; // seconds per block (approx)
+
+            // Get tip time and height
+            int64_t tip_time = 0;
+            int tip_height = 0;
+            {
+            LOCK(pwallet->cs_wallet);
+            CHECK_NONFATAL(pwallet->chain().findBlock(pwallet->GetLastBlockHash(), FoundBlock().time(tip_time).height(tip_height)));
+            }
+
+            // If pruned, compute an approximate earliest start time based on prune height
+            bool is_pruned = pwallet->chain().havePruned();
+            std::optional<int> prune_height_opt = pwallet->chain().getPruneHeight();
+            have_prune_boundary = false;
+            min_trial_start_time = 0;
+            if (is_pruned && prune_height_opt.has_value()) {
+                const int prune_height = prune_height_opt.value();
+                int64_t blocks_diff = tip_height - prune_height;
+                if (blocks_diff < 0) blocks_diff = 0;
+                int64_t prune_time_est = tip_time - blocks_diff * avg_block_time;
+                if (prune_time_est < 0) prune_time_est = 0;
+                min_trial_start_time = prune_time_est;
+                have_prune_boundary = true;
+            }
+
+            // Attempt incremental rescans using the helper defined above.
+            int out_chunks_tried = 0;
+            int64_t out_lowest_ts = 0;
+            UniValue early = IncrementalRescansNonOverlap(wallet, tip_time, tip_height, chunk_blocks, avg_block_time, have_prune_boundary,
+                                                            min_trial_start_time, utxo_scanned_balance, reserver, response, out_chunks_tried, out_lowest_ts);
+
+            if (!early.isNull()) {
+                // Matched and response already annotated by helper.
+                return early;
+            }
+
+            if (have_prune_boundary) {
+                // Set the fallback rescan start to the prune boundary (instead of 0)
+                lowest_timestamp = min_trial_start_time;
+            } else {
+                // Non-pruned node: incremental attempts scanned back to timestamp 0 (genesis)
+                lowest_timestamp = 0;
+            }
+        }
+
     }
 
     // Rescan the blockchain using the lowest timestamp
