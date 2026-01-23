@@ -28,6 +28,7 @@ add_executable(bench_bitcoin
   examples.cpp
   gcs_filter.cpp
   hashpadding.cpp
+  import_descriptor_rescan.cpp
   index_blockfilter.cpp
   load_external.cpp
   lockedpool.cpp
