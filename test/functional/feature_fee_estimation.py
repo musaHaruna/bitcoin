@@ -169,11 +169,30 @@ class EstimateFeeTest(BitcoinTestFramework):
         # We shuffle our confirmed txout set before each set of transactions
         # small_txpuzzle_randfee will use the transactions that have inputs already in the chain when possible
         # resorting to tx's that depend on the mempool when those run out
+        
+        # Define a controlled fee tier system
+        # Each tuple: (fee_multiplier relative to min_fee, probability of this tier)
+        fee_tiers = [(1, 0.2), (5, 0.3), (10, 0.3), (20, 0.2)]
+
+        # Precompute cumulative probabilities for random selection
+        cum_probs = []
+        total = 0
+        for _, prob in fee_tiers:
+            total += prob
+            cum_probs.append(total)
+
         for _ in range(numblocks):
             random.shuffle(self.confutxo)
             batch_sendtx_reqs = []
             for _ in range(random.randrange(100 - 50, 100 + 50)):
                 from_index = random.randint(1, 2)
+                # Select fee tier using weighted probabilities
+                r = random.random()
+                for idx, threshold in enumerate(cum_probs):
+                    if r <= threshold:
+                        fee_multiplier = fee_tiers[idx][0]
+                        break
+
                 (tx_bytes, fee) = small_txpuzzle_randfee(
                     self.wallet,
                     self.nodes[from_index],
@@ -181,7 +200,7 @@ class EstimateFeeTest(BitcoinTestFramework):
                     self.memutxo,
                     Decimal("0.005"),
                     min_fee,
-                    min_fee,
+                    min_fee * fee_multiplier,
                     batch_sendtx_reqs,
                 )
                 tx_kbytes = tx_bytes / 1000.0
@@ -292,7 +311,6 @@ class EstimateFeeTest(BitcoinTestFramework):
             dec_txs = [res["result"] for res in node.batch([node.decoderawtransaction.get_request(tx["hex"]) for tx in txs])]
             self.wallet.scan_txs(dec_txs)
 
-
         # Mine the last replacement txs
         self.sync_mempools(wait=0.1, nodes=[node, miner])
         self.generate(miner, 1)
@@ -321,7 +339,6 @@ class EstimateFeeTest(BitcoinTestFramework):
         # Start node and ensure the fee_estimates.dat file was not read
         self.start_node(0)
         assert_equal(self.nodes[0].estimatesmartfee(1)["errors"], ["Insufficient data or no feerate found"])
-
 
     def test_estimate_dat_is_flushed_periodically(self):
         fee_dat = self.nodes[0].chain_path / "fee_estimates.dat"
@@ -374,7 +391,6 @@ class EstimateFeeTest(BitcoinTestFramework):
         fee_dat_current_content = open(fee_dat, "rb").read()
         assert_not_equal(fee_dat_current_content, fee_dat_initial_content)
 
-
     def test_acceptstalefeeestimates_option(self):
         # Get the initial fee rate while node is running
         fee_rate = self.nodes[0].estimatesmartfee(1)["feerate"]
@@ -425,7 +441,6 @@ class EstimateFeeTest(BitcoinTestFramework):
         # conservative mode will consider longer time horizons while economical mode does not
         # Check the fee estimates for both modes after mining low fee transactions.
         check_fee_estimates_btw_modes(self.nodes[0], high_feerate, low_feerate)
-
 
     def run_test(self):
         self.log.info("This test is time consuming, please be patient")
