@@ -245,6 +245,14 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
                                          double successBreakPoint, unsigned int nBlockHeight,
                                          EstimationResult *result) const
 {
+    // High-level start log
+    LogDebug(BCLog::ESTIMATEFEE,
+        "EstimateMedianVal START: confTarget=%d, sufficientTxVal=%.2f, successBreakPoint=%.2f, nBlockHeight=%u, scale=%u, numBuckets=%zu\n",
+        confTarget, sufficientTxVal, successBreakPoint, nBlockHeight, scale, buckets.size());
+    LogDebug(BCLog::ESTIMATEFEE,
+        "Interpretation: confTarget=%d means we want transactions to confirm within %d block(s). "
+        "scale=%u means confirmation data are stored at resolution=%u (periods are coarser/finer accordingly).\n",
+        confTarget, confTarget, scale, scale);
     // Counters for a bucket (or range of buckets)
     double nConf = 0; // Number of tx's confirmed within the confTarget
     double totalNum = 0; // Total number of tx's that were ever confirmed
@@ -252,6 +260,10 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
     double failNum = 0; // Number of tx's that were never confirmed but removed from the mempool after confTarget
     const int periodTarget = (confTarget + scale - 1) / scale;
     const int maxbucketindex = buckets.size() - 1;
+
+    LogDebug(BCLog::ESTIMATEFEE,
+        "confTarget=%d blocks → periodTarget=%d (which period in historical stats we use for this target).",
+        confTarget, periodTarget);
 
     // We'll combine buckets until we have enough samples.
     // The near and far variables will define the range we've combined
@@ -263,6 +275,12 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
     unsigned int curFarBucket = maxbucketindex;
     unsigned int bestFarBucket = maxbucketindex;
 
+    // Minimum-data threshold 
+    double neededPerRange = sufficientTxVal / (1 - decay);
+    LogDebug(BCLog::ESTIMATEFEE,
+    "Sampling check: We want at least %.2f transactions in this feerate range to trust the estimate. "
+    "Older data is weighted by decay=%.5f, so after adjusting for that we need about %.2f effective historical transactions.\n",
+    sufficientTxVal, decay, neededPerRange);
     // We'll always group buckets into sets that meet sufficientTxVal --
     // this ensures that we're using consistent groups between different
     // confirmation targets.
@@ -280,6 +298,11 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
         if (newBucketRange) {
             curNearBucket = bucket;
             newBucketRange = false;
+            //Starting bucket
+            LogDebug(BCLog::ESTIMATEFEE,
+            "Analyzing a new set of transaction buckets starting at index %d. "
+            "Transactions in this starting bucket have fees up to %.8g satoshis per virtual byte.\n",
+            curNearBucket, buckets[curNearBucket]);
         }
         curFarBucket = bucket;
         nConf += confAvg[periodTarget - 1][bucket];
@@ -294,19 +317,72 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
         // (Only count the confirmed data points, so that each confirmation count
         // will be looking at the same amount of data and same bucket breaks)
 
+        // Show info about the current fee bucket we are analyzing
+        LogDebug(BCLog::ESTIMATEFEE,
+            "Checking bucket %d (transactions with fees up to %.8g sats/vB): "
+            "historical transactions ~%.2f, confirmed within target ~%.2f, "
+            "dropped after target ~%.2f, currently still unconfirmed for target=%d, "
+            "older unconfirmed transactions=%d",
+            bucket,                  // Bucket index
+            buckets[bucket],         // Max fee in this bucket
+            txCtAvg[bucket],         // Average number of tx historically in this bucket
+            confAvg[periodTarget-1][bucket], // Number confirmed within target
+            failAvg[periodTarget-1][bucket], // Number dropped after target
+            unconfTxs[(nBlockHeight - confTarget) % bins][bucket], // Still waiting in mempool
+            oldUnconfTxs[bucket]);   // Old unconfirmed txs from previous periods
+
+        // What each important value above means 
+        LogDebug(BCLog::ESTIMATEFEE,
+            "Explanation: txCtAvg=%.2f is the average number of transactions historically seen in this fee range. "
+            "confAvg=%.2f is how many of those confirmed within the target number of blocks. "
+            "failAvg=%.2f is how many left the mempool unconfirmed after the target. "
+            "Currently unconfirmed in mempool = %d",
+            txCtAvg[bucket], confAvg[periodTarget-1][bucket], failAvg[periodTarget-1][bucket],
+            unconfTxs[(nBlockHeight - confTarget) % bins][bucket]);
+                
+        // Show the cumulative range of buckets currently being considered for fee estimation
+        LogDebug(BCLog::ESTIMATEFEE,
+            "Current bucket range from %d to %d: total historical tx units in this range = %.2f, "
+            "minimum required for stable estimate = %.2f",
+            curNearBucket, curFarBucket, partialNum, neededPerRange);
+        // If we don't have enough samples yet, continue accumulating more buckets.
         if (partialNum < sufficientTxVal / (1 - decay)) {
             // the buckets we've added in this round aren't sufficient
             // so keep adding
+            double missing = neededPerRange - partialNum;
+            LogDebug(BCLog::ESTIMATEFEE,
+                "Not enough historical data in current bucket range %d-%d: need ~%.2f more 'historical tx units' before we can test success probability. Continuing to add lower-fee buckets.\n",
+                curNearBucket, curFarBucket, missing);
             continue;
         } else {
             partialNum = 0; // reset for the next range we'll add
 
             double curPct = nConf / (totalNum + failNum + extraNum);
+            // Show the raw numbers for the current fee bucket range being tested
+            LogDebug(BCLog::ESTIMATEFEE,
+                "Checking fee bucket range %d to %d (higher fees first):\n"
+                "  Transactions confirmed within target (%d blocks): %.2f\n"
+                "  Total transactions ever confirmed in this range: %.2f\n"
+                "  Transactions that left the mempool unconfirmed after target: %.2f\n"
+                "  Transactions currently still waiting in mempool beyond target: %d\n",
+                curNearBucket, curFarBucket, confTarget,
+                nConf, totalNum, failNum, extraNum);
 
+            // The success percentage (curPct)
+            LogDebug(BCLog::ESTIMATEFEE,
+                "Calculated success rate for this fee range (curPct) = %.4f which %.2f%%\n in percent"
+                "Explanation: Based on historical confirmations, transactions that left unconfirmed, "
+                "and those still pending, a transaction paying this fee has roughly %.2f%% chance "
+                "of confirming within %d block(s).\n",
+                curPct, 100.0 * curPct, 100.0 * curPct, confTarget);
             // Check to see if we are no longer getting confirmed at the success rate
             if (curPct < successBreakPoint) {
                 if (passing == true) {
                     // First time we hit a failure record the failed bucket
+                    LogDebug(BCLog::ESTIMATEFEE,
+                    "FAIL: The transaction fee range from bucket %d to %d did NOT meet the target confirmation rate.\n"
+                    "      Current success rate = %.2f (%.2f%%), which is below the required %.2f (%.2f%%).\n",
+                    curNearBucket, curFarBucket, curPct, 100.0 * curPct, successBreakPoint, 100.0 * successBreakPoint);
                     unsigned int failMinBucket = std::min(curNearBucket, curFarBucket);
                     unsigned int failMaxBucket = std::max(curNearBucket, curFarBucket);
                     failBucket.start = failMinBucket ? buckets[failMinBucket - 1] : 0;
@@ -315,6 +391,11 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
                     failBucket.totalConfirmed = totalNum;
                     failBucket.inMempool = extraNum;
                     failBucket.leftMempool = failNum;
+                    LogDebug(BCLog::ESTIMATEFEE,
+                        "Why it may have failed:\n"
+                        "  - Not enough historical transaction data in this fee range (small sample size, noisy data).\n"
+                        "  - Many transactions are still unconfirmed in the mempool (extraNum=%d), lowering the effective success rate.\n",
+                        extraNum);
                     passing = false;
                 }
                 continue;
@@ -336,6 +417,14 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
                 bestNearBucket = curNearBucket;
                 bestFarBucket = curFarBucket;
                 newBucketRange = true;
+                LogDebug(BCLog::ESTIMATEFEE,
+                    "PASS BucketRange %d-%d: This fee range meets success requirements (curPct=%.4f >= %.4f).\n"
+                    "Interpretation: historically, a transaction paying a fee within (%.8g - %.8g) sats/vB "
+                    "had roughly a %.2f%% chance to confirm within %d block(s) (including outstanding & evicted txs in calculation).\n",
+                    curNearBucket, curFarBucket, curPct, successBreakPoint,
+                    (curNearBucket ? buckets[curNearBucket - 1] : 0.0), buckets[curFarBucket],
+                    100.0 * (passBucket.withinTarget / (passBucket.totalConfirmed + passBucket.inMempool + passBucket.leftMempool)),
+                    confTarget);
             }
         }
     }
@@ -358,13 +447,40 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
             if (txCtAvg[j] < txSum)
                 txSum -= txCtAvg[j];
             else { // we're in the right bucket
+                // We pick the average feerate recorded for bucket j as the median approximation
                 median = m_feerate_avg[j] / txCtAvg[j];
+                LogDebug(BCLog::ESTIMATEFEE,
+                    "Median selection: the middle transaction falls in bucket index %u, "
+                    "which includes all transactions paying up to %.8g sats/vB.\n"
+                    "This bucket has %.2f 'historical transaction units', meaning the midpoint of all past transactions landed here.\n"
+                    "Calculated median fee for this bucket = total fees in bucket / number of transactions = %.8f sats/vB.\n",
+                j, buckets[j], txCtAvg[j], median);
                 break;
             }
         }
 
         passBucket.start = minBucket ? buckets[minBucket-1] : 0;
         passBucket.end = buckets[maxBucket];
+        LogDebug(BCLog::ESTIMATEFEE,
+            "Final passing range: (%.8g - %.8g) sats/vB. Approximate median for that range: %.8f sats/vB\n",
+            passBucket.start, passBucket.end, median);
+    } else {
+        if (!foundAnswer) {
+            LogDebug(BCLog::ESTIMATEFEE,
+                "Fee estimation could not find any reliable fee range.\n"
+                "Possible reasons:\n"
+                "  - Not enough historical transactions in any fee bucket to make a confident estimate.\n"
+                "  - The required success rate (successBreakPoint = %.2f) is higher than what we ever observed.\n"
+                "  - Many transactions are still unconfirmed in the mempool, lowering the success rate.\n"
+                "  - The node has little or no historical data (recent startup or reindex).\n"
+                "  - Unusual miner behavior or full blocks affected the observed data.\n",
+                successBreakPoint);
+        } else {
+            // foundAnswer==true but txSum==0 (degenerate); explain this improbable case
+            LogDebug(BCLog::ESTIMATEFEE,
+                "Warning: A fee range passed the success threshold, but no historical transactions were recorded in that range (txSum = 0). "
+                "This suggests an internal data issue or missing statistics; median fee cannot be computed reliably.\n");
+        }
     }
 
     // If we were passing until we reached last few buckets with insufficient data, then report those as failed
@@ -377,6 +493,10 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
         failBucket.totalConfirmed = totalNum;
         failBucket.inMempool = extraNum;
         failBucket.leftMempool = failNum;
+        LogDebug(BCLog::ESTIMATEFEE,
+            "Edge case detected: the loop ended while a fee range was still passing, "
+            "but a new range was not started. For diagnostic purposes, reporting this trailing range as failed: %.8g - %.8g sats/vB.\n",
+            failBucket.start, failBucket.end);
     }
 
     float passed_within_target_perc = 0.0;
@@ -388,16 +508,28 @@ double TxConfirmStats::EstimateMedianVal(int confTarget, double sufficientTxVal,
         failed_within_target_perc = 100 * failBucket.withinTarget / (failBucket.totalConfirmed + failBucket.inMempool + failBucket.leftMempool);
     }
 
-    LogDebug(BCLog::ESTIMATEFEE, "FeeEst: %d > %.0f%% decay %.5f: feerate: %g from (%g - %g) %.2f%% %.1f/(%.1f %d mem %.1f out) Fail: (%g - %g) %.2f%% %.1f/(%.1f %d mem %.1f out)\n",
-             confTarget, 100.0 * successBreakPoint, decay,
-             median, passBucket.start, passBucket.end,
-             passed_within_target_perc,
-             passBucket.withinTarget, passBucket.totalConfirmed, passBucket.inMempool, passBucket.leftMempool,
-             failBucket.start, failBucket.end,
-             failed_within_target_perc,
-             failBucket.withinTarget, failBucket.totalConfirmed, failBucket.inMempool, failBucket.leftMempool);
+    // Final debug line summarizing what the estimator concluded with plain English aids
+    LogDebug(BCLog::ESTIMATEFEE,
+        "FeeEst Summary: target=%d required_success=%.0f%% decay=%.5f -> estimated median: %g sats/vB\n"
+        "Passing range: (%.8g - %.8g) sats/vB -> success rate ~%.2f%% (%g/%g total+mem+left)\n"
+        "Failing range: (%.8g - %.8g) sats/vB -> success rate ~%.2f%% (%g/%g total+mem+left)\n",
+        confTarget, 100.0 * successBreakPoint, decay,
+        median,
+        passBucket.start, passBucket.end, passed_within_target_perc,
+        passBucket.withinTarget, (passBucket.totalConfirmed + passBucket.inMempool + passBucket.leftMempool),
+        failBucket.start, failBucket.end, failed_within_target_perc,
+        failBucket.withinTarget, (failBucket.totalConfirmed + failBucket.inMempool + failBucket.leftMempool)
+    );
 
-
+    // Extra node message on failure vs success with suggestions
+    if (!foundAnswer) {
+        LogPrintf("EstimateMedianVal FAILED: confTarget=%d, scale=%u, no bucket range met successBreakPoint.\n"
+                  "Suggestions: check node's mempool state, ensure node has enough historical blocks (not just recently started),\n"
+                  "try a lower success threshold or use a shorter horizon (shortStats) if you want a more reactive estimate.\n",
+                  confTarget, scale);
+    } else {
+        LogPrintf("EstimateMedianVal SUCCESS: confTarget=%d, scale=%u, medianFee=%.8f sats/vB\n", confTarget, scale, median);
+    }
     if (result) {
         result->pass = passBucket;
         result->fail = failBucket;

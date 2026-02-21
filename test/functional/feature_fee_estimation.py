@@ -5,6 +5,7 @@
 """Test fee estimation code."""
 from copy import deepcopy
 from decimal import Decimal, ROUND_DOWN
+import json
 import os
 import random
 import time
@@ -76,6 +77,7 @@ def check_raw_estimates(node, fees_seen):
 
     delta = 1.0e-6  # account for rounding error
     for i in range(1, 26):
+        print(json.dumps(node.estimaterawfee(i), indent=4, default=float))
         for _, e in node.estimaterawfee(i).items():
             feerate = float(e["feerate"])
             assert_greater_than(feerate, 0)
