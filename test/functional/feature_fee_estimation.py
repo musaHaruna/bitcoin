@@ -77,7 +77,7 @@ def check_raw_estimates(node, fees_seen):
 
     delta = 1.0e-6  # account for rounding error
     for i in range(1, 26):
-        print(json.dumps(node.estimaterawfee(i), indent=4, default=float))
+        #print(json.dumps(node.estimaterawfee(i), indent=4, default=float))
         for _, e in node.estimaterawfee(i).items():
             feerate = float(e["feerate"])
             assert_greater_than(feerate, 0)
@@ -164,7 +164,7 @@ class EstimateFeeTest(BitcoinTestFramework):
         # Node2 is a stingy miner, that
         # produces too small blocks (room for only 55 or so transactions)
 
-    def transact_and_mine(self, numblocks, mining_node):
+    def transact_and_mine(self, numblocks, mining_node, target_mempool_len=0, max_extra_blocks=200):
         min_fee = Decimal("0.00001")
         # We will now mine numblocks blocks generating on average 100 transactions between each block
         # We shuffle our confirmed txout set before each set of transactions
@@ -199,6 +199,19 @@ class EstimateFeeTest(BitcoinTestFramework):
                 else:
                     newmem.append(utx)
             self.memutxo = newmem
+        iteration = 0
+        while len(self.memutxo) > target_mempool_len and iteration < max_extra_blocks:
+            iteration += 1
+            mined = mining_node.getblock(self.generate(mining_node, 1)[0], True)["tx"]
+            newmem = []
+            for utx in self.memutxo:
+                if utx["txid"] in mined:
+                    self.confutxo.append(utx)
+                else:
+                    newmem.append(utx)
+            self.memutxo = newmem
+            print(f"Extra mining iteration {iteration}, remaining mempool transactions: {len(self.memutxo)}")
+        print(f"Mempool largely cleared after {iteration} extra iterations.")
 
     def initial_split(self, node):
         """Split two coinbase UTxOs into many small coins"""
