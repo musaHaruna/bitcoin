@@ -3416,7 +3416,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
 
                 if (kernel::IsInterrupted(m_chainman.GetNotifications().blockTip(
                         /*state=*/GetSynchronizationState(still_in_ibd, m_chainman.m_blockman.m_blockfiles_indexed),
-                        /*index=*/*pindexNewTip,
+                        /*tip=*/kernel::BlockTip{pindexNewTip->nHeight, pindexNewTip->GetBlockTime(), pindexNewTip->GetBlockHash()},
                         /*verification_progress=*/m_chainman.GuessVerificationProgress(pindexNewTip))))
                 {
                     // Just breaking and returning success for now. This could
@@ -3674,7 +3674,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
         // changes.
         (void)m_chainman.GetNotifications().blockTip(
             /*state=*/GetSynchronizationState(m_chainman.IsInitialBlockDownload(), m_chainman.m_blockman.m_blockfiles_indexed),
-            /*index=*/*to_mark_failed->pprev,
+            /*tip=*/kernel::BlockTip{to_mark_failed->pprev->nHeight, to_mark_failed->pprev->GetBlockTime(), to_mark_failed->pprev->GetBlockHash()},
             /*verification_progress=*/WITH_LOCK(m_chainman.GetMutex(), return m_chainman.GuessVerificationProgress(to_mark_failed->pprev)));
 
         // Fire ActiveTipChange now for the current chain tip to make sure clients are notified.
@@ -4578,7 +4578,7 @@ bool Chainstate::LoadChainTip()
         // Ignoring return value for now.
         (void)m_chainman.GetNotifications().blockTip(
             /*state=*/GetSynchronizationState(/*init=*/true, m_chainman.m_blockman.m_blockfiles_indexed),
-            /*index=*/*pindex,
+            /*tip=*/kernel::BlockTip{pindex->nHeight, pindex->GetBlockTime(), pindex->GetBlockHash()},
             /*verification_progress=*/m_chainman.GuessVerificationProgress(tip));
     }
 

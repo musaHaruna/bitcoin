@@ -411,15 +411,13 @@ public:
     }
     std::unique_ptr<Handler> handleNotifyBlockTip(NotifyBlockTipFn fn) override
     {
-        return MakeSignalHandler(::uiInterface.NotifyBlockTip_connect([fn](SynchronizationState sync_state, const CBlockIndex& block, double verification_progress) {
-            fn(sync_state, BlockTip{block.nHeight, block.GetBlockTime(), block.GetBlockHash()}, verification_progress);
-        }));
+        return MakeSignalHandler(::uiInterface.NotifyBlockTip_connect(fn));
     }
     std::unique_ptr<Handler> handleNotifyHeaderTip(NotifyHeaderTipFn fn) override
     {
         return MakeSignalHandler(
             ::uiInterface.NotifyHeaderTip_connect([fn](SynchronizationState sync_state, int64_t height, int64_t timestamp, bool presync) {
-                fn(sync_state, BlockTip{(int)height, timestamp, uint256{}}, presync);
+                fn(sync_state, BlockTip{static_cast<int>(height), timestamp, uint256{}}, presync);
             }));
     }
     NodeContext* context() override { return m_context; }

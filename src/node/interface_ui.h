@@ -6,12 +6,13 @@
 #ifndef BITCOIN_NODE_INTERFACE_UI_H
 #define BITCOIN_NODE_INTERFACE_UI_H
 
+#include <interfaces/types.h>
+
 #include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
 
-class CBlockIndex;
 enum class SynchronizationState;
 struct bilingual_str;
 
@@ -101,7 +102,7 @@ public:
     ADD_SIGNALS_DECL_WRAPPER(ShowProgress, void, const std::string& title, int nProgress, bool resume_possible);
 
     /** New block has been accepted */
-    ADD_SIGNALS_DECL_WRAPPER(NotifyBlockTip, void, SynchronizationState, const CBlockIndex& block, double verification_progress);
+    ADD_SIGNALS_DECL_WRAPPER(NotifyBlockTip, void, SynchronizationState, interfaces::BlockTip block, double verification_progress);
 
     /** Best header has changed */
     ADD_SIGNALS_DECL_WRAPPER(NotifyHeaderTip, void, SynchronizationState, int64_t height, int64_t timestamp, bool presync);

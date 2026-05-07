@@ -2013,10 +2013,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 #if HAVE_SYSTEM
     const std::string block_notify = args.GetArg("-blocknotify", "");
     if (!block_notify.empty()) {
-        uiInterface.NotifyBlockTip_connect([block_notify](SynchronizationState sync_state, const CBlockIndex& block, double /* verification_progress */) {
+        uiInterface.NotifyBlockTip_connect([block_notify](SynchronizationState sync_state, interfaces::BlockTip block, double /* verification_progress */) {
             if (sync_state != SynchronizationState::POST_INIT) return;
             std::string command = block_notify;
-            ReplaceAll(command, "%s", block.GetBlockHash().GetHex());
+            ReplaceAll(command, "%s", block.block_hash.GetHex());
             std::thread t(runCommand, command);
             t.detach(); // thread runs free
         });

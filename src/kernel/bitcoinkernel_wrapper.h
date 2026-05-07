@@ -7,6 +7,7 @@
 
 #include <kernel/bitcoinkernel.h>
 
+#include <algorithm>
 #include <array>
 #include <exception>
 #include <functional>
@@ -932,12 +933,30 @@ public:
 
 };
 
+struct BlockTip {
+    int32_t block_height;
+    int64_t block_time;
+    std::array<std::byte, 32> block_hash;
+
+    explicit BlockTip(const btck_BlockTip& tip)
+        : block_height{tip.block_height},
+          block_time{tip.block_time}
+    {
+        std::copy_n(tip.block_hash, block_hash.size(), reinterpret_cast<unsigned char*>(block_hash.data()));
+    }
+
+    BlockHash GetHash() const
+    {
+        return BlockHash{block_hash};
+    }
+};
+
 class KernelNotifications
 {
 public:
     virtual ~KernelNotifications() = default;
 
-    virtual void BlockTipHandler(SynchronizationState state, BlockTreeEntry entry, double verification_progress) {}
+    virtual void BlockTipHandler(SynchronizationState state, BlockTip tip, double verification_progress) {}
 
     virtual void HeaderTipHandler(SynchronizationState state, int64_t height, int64_t timestamp, bool presync) {}
 
@@ -1044,7 +1063,7 @@ public:
             btck_NotificationInterfaceCallbacks{
                 .user_data = heap_notifications.release(),
                 .user_data_destroy = +[](void* user_data) { delete static_cast<user_type>(user_data); },
-                .block_tip = +[](void* user_data, btck_SynchronizationState state, const btck_BlockTreeEntry* entry, double verification_progress) { (*static_cast<user_type>(user_data))->BlockTipHandler(static_cast<SynchronizationState>(state), BlockTreeEntry{entry}, verification_progress); },
+                .block_tip = +[](void* user_data, btck_SynchronizationState state, btck_BlockTip tip, double verification_progress) { (*static_cast<user_type>(user_data))->BlockTipHandler(static_cast<SynchronizationState>(state), BlockTip{tip}, verification_progress); },
                 .header_tip = +[](void* user_data, btck_SynchronizationState state, int64_t height, int64_t timestamp, int presync) { (*static_cast<user_type>(user_data))->HeaderTipHandler(static_cast<SynchronizationState>(state), height, timestamp, presync == 1); },
                 .progress = +[](void* user_data, const char* title, size_t title_len, int progress_percent, int resume_possible) { (*static_cast<user_type>(user_data))->ProgressHandler({title, title_len}, progress_percent, resume_possible == 1); },
                 .warning_set = +[](void* user_data, btck_Warning warning, const char* message, size_t message_len) { (*static_cast<user_type>(user_data))->WarningSetHandler(static_cast<Warning>(warning), {message, message_len}); },

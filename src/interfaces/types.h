@@ -7,12 +7,21 @@
 
 #include <uint256.h>
 
+#include <cstdint>
+
 namespace interfaces {
 
 //! Hash/height pair to help track and identify blocks.
 struct BlockRef {
     uint256 hash;
     int height = -1;
+};
+
+//! Block and header tip information.
+struct BlockTip {
+    int block_height;
+    int64_t block_time;
+    uint256 block_hash;
 };
 
 } // namespace interfaces

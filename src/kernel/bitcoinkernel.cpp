@@ -218,6 +218,15 @@ btck_SynchronizationState cast_state(SynchronizationState state)
     assert(false);
 }
 
+btck_BlockTip cast_tip(const kernel::BlockTip& tip)
+{
+    btck_BlockTip result{};
+    result.block_height = tip.block_height;
+    result.block_time = tip.block_time;
+    std::memcpy(result.block_hash, tip.block_hash.data(), sizeof(result.block_hash));
+    return result;
+}
+
 btck_Warning cast_btck_warning(kernel::Warning warning)
 {
     switch (warning) {
@@ -297,9 +306,9 @@ public:
         m_cbs.user_data = nullptr;
     }
 
-    kernel::InterruptResult blockTip(SynchronizationState state, const CBlockIndex& index, double verification_progress) override
+    kernel::InterruptResult blockTip(SynchronizationState state, kernel::BlockTip tip, double verification_progress) override
     {
-        if (m_cbs.block_tip) m_cbs.block_tip(m_cbs.user_data, cast_state(state), btck_BlockTreeEntry::ref(&index), verification_progress);
+        if (m_cbs.block_tip) m_cbs.block_tip(m_cbs.user_data, cast_state(state), cast_tip(tip), verification_progress);
         return {};
     }
     void headerTip(SynchronizationState state, int64_t height, int64_t timestamp, bool presync) override

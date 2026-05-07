@@ -5,6 +5,8 @@
 #ifndef BITCOIN_INTERFACES_NODE_H
 #define BITCOIN_INTERFACES_NODE_H
 
+#include <interfaces/types.h>
+
 #include <common/settings.h>
 #include <consensus/amount.h>
 #include <logging.h>
@@ -44,7 +46,6 @@ class CCoinControl;
 namespace interfaces {
 class Handler;
 class WalletLoader;
-struct BlockTip;
 
 //! Block and header tip information
 struct BlockAndHeaderTipInfo
@@ -271,13 +272,6 @@ public:
 
 //! Return implementation of Node interface.
 std::unique_ptr<Node> MakeNode(node::NodeContext& context);
-
-//! Block tip (could be a header or not, depends on the subscribed signal).
-struct BlockTip {
-    int block_height;
-    int64_t block_time;
-    uint256 block_hash;
-};
 
 } // namespace interfaces
 

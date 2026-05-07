@@ -6,9 +6,9 @@
 #define BITCOIN_KERNEL_NOTIFICATIONS_INTERFACE_H
 
 #include <cstdint>
+#include <uint256.h>
 #include <variant>
 
-class CBlockIndex;
 enum class SynchronizationState;
 struct bilingual_str;
 
@@ -17,6 +17,14 @@ namespace kernel {
 //! Result type for use with std::variant to indicate that an operation should be interrupted.
 struct Interrupted{};
 enum class Warning;
+
+//! Detached tip information for crossing notification boundaries without
+//! exposing internal block index structures.
+struct BlockTip {
+    int block_height;
+    int64_t block_time;
+    uint256 block_hash;
+};
 
 
 //! Simple result type for functions that need to propagate an interrupt status and don't have other return values.
@@ -37,7 +45,7 @@ class Notifications
 public:
     virtual ~Notifications() = default;
 
-    [[nodiscard]] virtual InterruptResult blockTip(SynchronizationState state, const CBlockIndex& index, double verification_progress) { return {}; }
+    [[nodiscard]] virtual InterruptResult blockTip(SynchronizationState state, BlockTip tip, double verification_progress) { return {}; }
     virtual void headerTip(SynchronizationState state, int64_t height, int64_t timestamp, bool presync) {}
     virtual void progress(const bilingual_str& title, int progress_percent, bool resume_possible) {}
     virtual void warningSet(Warning id, const bilingual_str& message) {}

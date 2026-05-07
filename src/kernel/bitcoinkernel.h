@@ -315,6 +315,18 @@ typedef struct btck_Txid btck_Txid;
  */
 typedef struct btck_BlockHeader btck_BlockHeader;
 
+/**
+ * Block tip information passed to notification callbacks.
+ *
+ * The block hash uses the same raw byte encoding accepted by
+ * @ref btck_block_hash_create and produced by @ref btck_block_hash_to_bytes.
+ */
+typedef struct {
+    int32_t block_height;
+    int64_t block_time;
+    unsigned char block_hash[32];
+} btck_BlockTip;
+
 /** Current sync state passed to tip changed callbacks. */
 typedef uint8_t btck_SynchronizationState;
 #define btck_SynchronizationState_INIT_REINDEX ((btck_SynchronizationState)(0))
@@ -342,7 +354,7 @@ typedef void (*btck_DestroyCallback)(void* user_data);
 /**
  * Function signatures for the kernel notifications.
  */
-typedef void (*btck_NotifyBlockTip)(void* user_data, btck_SynchronizationState state, const btck_BlockTreeEntry* entry, double verification_progress);
+typedef void (*btck_NotifyBlockTip)(void* user_data, btck_SynchronizationState state, btck_BlockTip tip, double verification_progress);
 typedef void (*btck_NotifyHeaderTip)(void* user_data, btck_SynchronizationState state, int64_t height, int64_t timestamp, int presync);
 typedef void (*btck_NotifyProgress)(void* user_data, const char* title, size_t title_len, int progress_percent, int resume_possible);
 typedef void (*btck_NotifyWarningSet)(void* user_data, btck_Warning warning, const char* message, size_t message_len);
@@ -424,7 +436,7 @@ typedef struct {
                                             //!< If user_data_destroy is also defined ownership of the user_data is passed to the
                                             //!< created context options and subsequently context.
     btck_DestroyCallback user_data_destroy; //!< Frees the provided user data structure.
-    btck_NotifyBlockTip block_tip;          //!< The chain's tip was updated to the provided block entry.
+    btck_NotifyBlockTip block_tip;          //!< The chain's tip was updated to the provided block tip information.
     btck_NotifyHeaderTip header_tip;        //!< A new best block header was added.
     btck_NotifyProgress progress;           //!< Reports on current block synchronization progress.
     btck_NotifyWarningSet warning_set;      //!< A warning issued by the kernel library during validation.
