@@ -4,6 +4,9 @@
 
 #include <kernel/bitcoinkernel.h>
 #include <kernel/bitcoinkernel_wrapper.h>
+#include <kernel/chainparams.h>
+#include <primitives/block.h>
+#include <streams.h>
 #include <util/fs.h>
 
 #define BOOST_TEST_MODULE Bitcoin Kernel Test Suite
@@ -11,6 +14,7 @@
 
 #include <test/kernel/block_data.h>
 #include <test/util/common.h>
+#include <test/util/mining.h>
 
 #include <charconv>
 #include <cstdint>
@@ -26,6 +30,11 @@
 #include <vector>
 
 using namespace btck;
+
+extern "C" {
+// Test-only hook intentionally kept out of the public bitcoinkernel.h header.
+BITCOINKERNEL_API int btck_chainstate_manager_options_set_fast_prune_for_testing(btck_ChainstateManagerOptions* chainstate_manager_options, int fast_prune);
+}
 
 std::string random_string(uint32_t length)
 {
@@ -73,6 +82,13 @@ std::string byte_span_to_hex_string_reversed(std::span<const std::byte> bytes)
     }
 
     return oss.str();
+}
+
+std::vector<std::byte> block_to_bytes(const CBlock& block)
+{
+    DataStream stream{};
+    stream << TX_WITH_WITNESS(block);
+    return {stream.begin(), stream.end()};
 }
 
 constexpr auto VERIFY_ALL_PRE_SEGWIT{ScriptVerificationFlags::P2SH | ScriptVerificationFlags::DERSIG |
@@ -770,6 +786,11 @@ BOOST_AUTO_TEST_CASE(btck_chainman_tests)
 
     ChainstateManagerOptions chainman_opts{context, PathToString(test_directory.m_directory), PathToString(test_directory.m_directory / "blocks")};
     chainman_opts.SetWorkerThreads(4);
+    BOOST_CHECK(chainman_opts.SetPrune(0));
+    BOOST_CHECK(chainman_opts.SetPrune(1));
+    BOOST_CHECK(!chainman_opts.SetPrune(549));
+    BOOST_CHECK(chainman_opts.SetPrune(550));
+    BOOST_CHECK(chainman_opts.SetPrune(0));
     BOOST_CHECK(!chainman_opts.SetWipeDbs(/*wipe_block_tree=*/true, /*wipe_chainstate=*/false));
     BOOST_CHECK(chainman_opts.SetWipeDbs(/*wipe_block_tree=*/true, /*wipe_chainstate=*/true));
     BOOST_CHECK(chainman_opts.SetWipeDbs(/*wipe_block_tree=*/false, /*wipe_chainstate=*/true));
@@ -1255,4 +1276,77 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
     BOOST_CHECK(!chainman->ReadBlock(tip_2).has_value());
     fs::remove(test_directory.m_directory / "blocks" / "rev00000.dat");
     BOOST_CHECK_THROW(chainman->ReadBlockSpentOutputs(tip), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(btck_chainman_pruning_tests)
+{
+    auto test_directory{TestDirectory{"pruning_test_bitcoin_kernel"}};
+    auto notifications{std::make_shared<TestKernelNotifications>()};
+    auto context{create_context(notifications, btck::ChainType::REGTEST)};
+    auto params{CChainParams::RegTest({})};
+    const auto blocks{CreateBlockChain(1300, *params)};
+
+    {
+        ChainstateManagerOptions chainman_opts{
+            context,
+            PathToString(test_directory.m_directory),
+            PathToString(test_directory.m_directory / "blocks")};
+        BOOST_CHECK(chainman_opts.SetPrune(1));
+        BOOST_CHECK_EQUAL(btck_chainstate_manager_options_set_fast_prune_for_testing(chainman_opts.get(), 1), 0);
+        ChainMan chainman{context, chainman_opts};
+
+        BOOST_CHECK(!chainman.PruneToHeight(1));
+
+        for (const auto& generated_block : blocks) {
+            Block block{block_to_bytes(*generated_block)};
+            bool new_block{false};
+            BOOST_CHECK(chainman.ProcessBlock(block, &new_block));
+            BOOST_CHECK(new_block);
+        }
+
+        auto chain{chainman.GetChain()};
+        BOOST_CHECK_EQUAL(chain.Height(), static_cast<int32_t>(blocks.size()));
+        auto old_entry{chain.GetByHeight(1)};
+        auto entry_for_direct_prune{chain.GetByHeight(800)};
+        auto tip_entry{chain.Entries().back()};
+        BOOST_REQUIRE(chainman.ReadBlock(old_entry));
+        BOOST_REQUIRE(chainman.ReadBlock(entry_for_direct_prune));
+        BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
+
+        BOOST_CHECK(chainman.PruneToHeight(700));
+        BOOST_CHECK(!chainman.ReadBlock(old_entry));
+        BOOST_REQUIRE(chainman.ReadBlock(entry_for_direct_prune));
+        BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
+        BOOST_CHECK(chainman.Prune());
+    }
+
+    {
+        ChainstateManagerOptions chainman_opts{
+            context,
+            PathToString(test_directory.m_directory),
+            PathToString(test_directory.m_directory / "blocks")};
+        BOOST_CHECK_THROW(ChainMan(context, chainman_opts), std::runtime_error);
+    }
+
+    {
+        ChainstateManagerOptions chainman_opts{
+            context,
+            PathToString(test_directory.m_directory),
+            PathToString(test_directory.m_directory / "blocks")};
+        BOOST_CHECK(chainman_opts.SetPrune(550));
+        BOOST_CHECK_EQUAL(btck_chainstate_manager_options_set_fast_prune_for_testing(chainman_opts.get(), 1), 0);
+        ChainMan chainman{context, chainman_opts};
+        auto chain{chainman.GetChain()};
+        auto old_entry{chain.GetByHeight(1)};
+        auto entry_for_direct_prune{chain.GetByHeight(800)};
+        auto tip_entry{chain.Entries().back()};
+
+        BOOST_CHECK(!chainman.ReadBlock(old_entry));
+        BOOST_REQUIRE(chainman.ReadBlock(entry_for_direct_prune));
+        BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
+        BOOST_CHECK(chainman.Prune());
+        BOOST_CHECK(chainman.PruneBlockEntry(entry_for_direct_prune));
+        BOOST_CHECK(!chainman.ReadBlock(entry_for_direct_prune));
+        BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
+    }
 }

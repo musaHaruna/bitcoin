@@ -6,6 +6,7 @@ target_link_libraries(test_kernel
   PRIVATE
     core_interface
     bitcoinkernel
+    test_util
     Boost::headers
 )
 
