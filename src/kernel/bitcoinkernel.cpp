@@ -28,6 +28,7 @@
 #include <sync.h>
 #include <uint256.h>
 #include <undo.h>
+#include <util/byte_units.h>
 #include <util/check.h>
 #include <util/fs.h>
 #include <util/result.h>
@@ -37,10 +38,12 @@
 #include <validation.h>
 #include <validationinterface.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <list>
 #include <memory>
 #include <span>
@@ -70,6 +73,15 @@ bool is_valid_flag_combination(script_verify_flags flags)
     if (flags & SCRIPT_VERIFY_CLEANSTACK && ~flags & (SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS)) return false;
     if (flags & SCRIPT_VERIFY_WITNESS && ~flags & SCRIPT_VERIFY_P2SH) return false;
     return true;
+}
+
+std::optional<uint64_t> prune_mode_to_target(uint64_t prune_mode)
+{
+    if (prune_mode == 0) return 0;
+    if (prune_mode == 1) return node::BlockManager::PRUNE_TARGET_MANUAL;
+    if (prune_mode < MIN_DISK_SPACE_FOR_BLOCK_FILES / 1_MiB) return std::nullopt;
+    if (prune_mode > std::numeric_limits<uint64_t>::max() / 1_MiB) return std::nullopt;
+    return prune_mode * 1_MiB;
 }
 
 class WriterStream
@@ -985,9 +997,43 @@ void btck_chainstate_manager_options_set_worker_threads_num(btck_ChainstateManag
     btck_ChainstateManagerOptions::get(opts).m_chainman_options.worker_threads_num = worker_threads;
 }
 
+int btck_chainstate_manager_options_set_prune(btck_ChainstateManagerOptions* chainman_opts, uint64_t prune_mode)
+{
+    const auto prune_target{prune_mode_to_target(prune_mode)};
+    if (!prune_target) {
+        LogError("Prune mode must be 0, 1, or at least %d MiB.", MIN_DISK_SPACE_FOR_BLOCK_FILES / 1_MiB);
+        return -1;
+    }
+    auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    LOCK(opts.m_mutex);
+    opts.m_blockman_options.prune_target = *prune_target;
+    opts.m_chainstate_load_options.prune = prune_mode != 0;
+    if (*prune_target == node::BlockManager::PRUNE_TARGET_MANUAL) {
+        LogInfo("Kernel chainstate manager prune mode set: mode=%d target=manual load_pruned=%d",
+                prune_mode, opts.m_chainstate_load_options.prune);
+    } else {
+        LogInfo("Kernel chainstate manager prune mode set: mode=%d target=%dMiB load_pruned=%d",
+                prune_mode, *prune_target / 1_MiB, opts.m_chainstate_load_options.prune);
+    }
+    return 0;
+}
+
 void btck_chainstate_manager_options_destroy(btck_ChainstateManagerOptions* options)
 {
     delete options;
+}
+
+// Test-only hook for exercising pruning behavior with small block files. This
+// is intentionally not declared in bitcoinkernel.h and should not be treated as
+// part of the public API.
+extern "C" BITCOINKERNEL_API int btck_chainstate_manager_options_set_fast_prune_for_testing(btck_ChainstateManagerOptions* chainman_opts, int fast_prune)
+{
+    auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    LOCK(opts.m_mutex);
+    opts.m_blockman_options.fast_prune = fast_prune == 1;
+    LogInfo("Kernel chainstate manager fast prune test mode set: fast_prune=%d",
+            opts.m_blockman_options.fast_prune);
+    return 0;
 }
 
 int btck_chainstate_manager_options_set_wipe_dbs(btck_ChainstateManagerOptions* chainman_opts, int wipe_block_tree_db, int wipe_chainstate_db)
@@ -1336,6 +1382,112 @@ int btck_chainstate_manager_process_block(
         *_new_block = new_block ? 1 : 0;
     }
     return result ? 0 : -1;
+}
+
+int btck_chainstate_manager_prune(btck_ChainstateManager* chainstate_manager)
+{
+    try {
+        auto& chainman{*btck_ChainstateManager::get(chainstate_manager).m_chainman};
+        if (!chainman.m_blockman.IsPruneMode()) {
+            LogError("Cannot prune blocks because the chainstate manager is not in prune mode.");
+            return -1;
+        }
+        if (chainman.m_blockman.GetPruneTarget() == node::BlockManager::PRUNE_TARGET_MANUAL) {
+            LogInfo("Kernel chainstate manager target prune skipped: manual prune mode has no target.");
+            return 0;
+        }
+        LogInfo("Kernel chainstate manager target prune requested: target=%dMiB",
+                chainman.m_blockman.GetPruneTarget() / 1_MiB);
+        chainman.ActiveChainstate().PruneAndFlush();
+        LogInfo("Kernel chainstate manager target prune completed.");
+        return 0;
+    } catch (const std::exception& e) {
+        LogError("Failed to prune chainstate manager: %s", e.what());
+        return -1;
+    }
+}
+
+int btck_chainstate_manager_prune_to_height(btck_ChainstateManager* chainstate_manager, int32_t height)
+{
+    try {
+        auto& chainman{*btck_ChainstateManager::get(chainstate_manager).m_chainman};
+        if (!chainman.m_blockman.IsPruneMode()) {
+            LogError("Cannot prune blocks because the chainstate manager is not in prune mode.");
+            return -1;
+        }
+        if (height < 0) {
+            LogError("Cannot prune to a negative block height.");
+            return -1;
+        }
+
+        LOCK(chainman.GetMutex());
+        Chainstate& active_chainstate{chainman.ActiveChainstate()};
+        const int chain_height{active_chainstate.m_chain.Height()};
+        if (static_cast<uint64_t>(chain_height) < chainman.GetParams().PruneAfterHeight()) {
+            LogError("Blockchain is too short for pruning.");
+            return -1;
+        }
+        if (chain_height <= static_cast<int>(MIN_BLOCKS_TO_KEEP)) {
+            LogError("Blockchain is too close to the tip for pruning.");
+            return -1;
+        }
+        if (height > chain_height) {
+            LogError("Blockchain is shorter than the attempted prune height.");
+            return -1;
+        }
+        const int prune_height{std::min<int>(height, chain_height - MIN_BLOCKS_TO_KEEP)};
+        if (prune_height <= 0) {
+            LogError("Cannot prune to a non-positive block height.");
+            return -1;
+        }
+        LogInfo("Kernel chainstate manager manual prune requested: requested_height=%d actual_height=%d chain_height=%d",
+                height, prune_height, chain_height);
+        PruneBlockFilesManual(active_chainstate, prune_height);
+        LogInfo("Kernel chainstate manager manual prune completed: actual_height=%d", prune_height);
+        return 0;
+    } catch (const std::exception& e) {
+        LogError("Failed to prune chainstate manager to height: %s", e.what());
+        return -1;
+    }
+}
+
+int btck_chainstate_manager_prune_block_entry_entry(
+    btck_ChainstateManager* chainstate_manager,
+    const btck_BlockTreeEntry* block_tree_entry)
+{
+    try {
+        auto& chainman{*btck_ChainstateManager::get(chainstate_manager).m_chainman};
+        if (!chainman.m_blockman.IsPruneMode()) {
+            LogError("Cannot prune blocks because the chainstate manager is not in prune mode.");
+            return -1;
+        }
+
+        LOCK(chainman.GetMutex());
+        const CBlockIndex& block_index{btck_BlockTreeEntry::get(block_tree_entry)};
+        if (!(block_index.nStatus & BLOCK_HAVE_DATA)) {
+            return 0;
+        }
+        const int file_number{block_index.nFile};
+        if (file_number < 0) {
+            LogError("Cannot prune block entry with invalid block file number.");
+            return -1;
+        }
+
+        LogInfo("Kernel chainstate manager block entry prune requested: height=%d file=%d hash=%s",
+                block_index.nHeight, file_number, block_index.GetBlockHash().ToString());
+        chainman.m_blockman.PruneOneBlockFile(file_number);
+        if (!chainman.m_blockman.m_have_pruned) {
+            chainman.m_blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true);
+            chainman.m_blockman.m_have_pruned = true;
+        }
+        chainman.m_blockman.WriteBlockIndexDB();
+        chainman.m_blockman.UnlinkPrunedFiles({file_number});
+        LogInfo("Kernel chainstate manager block entry prune completed: file=%d", file_number);
+        return 0;
+    } catch (const std::exception& e) {
+        LogError("Failed to prune block tree entry: %s", e.what());
+        return -1;
+    }
 }
 
 int btck_chainstate_manager_process_block_header(

@@ -1102,6 +1102,11 @@ public:
         btck_chainstate_manager_options_set_worker_threads_num(get(), worker_threads);
     }
 
+    bool SetPrune(uint64_t prune_mode)
+    {
+        return btck_chainstate_manager_options_set_prune(get(), prune_mode) == 0;
+    }
+
     bool SetWipeDbs(bool wipe_block_tree, bool wipe_chainstate)
     {
         return btck_chainstate_manager_options_set_wipe_dbs(get(), wipe_block_tree, wipe_chainstate) == 0;
@@ -1280,6 +1285,21 @@ public:
     bool ProcessBlockHeader(const BlockHeader& header, BlockValidationState& state)
     {
         return btck_chainstate_manager_process_block_header(get(), header.get(), state.get()) == 0;
+    }
+
+    bool Prune()
+    {
+        return btck_chainstate_manager_prune(get()) == 0;
+    }
+
+    bool PruneToHeight(int32_t height)
+    {
+        return btck_chainstate_manager_prune_to_height(get(), height) == 0;
+    }
+
+    bool PruneBlockEntry(const BlockTreeEntry& entry)
+    {
+        return btck_chainstate_manager_prune_block_entry_entry(get(), entry.get()) == 0;
     }
 
     ChainView GetChain() const

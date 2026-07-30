@@ -1089,6 +1089,22 @@ BITCOINKERNEL_API void btck_chainstate_manager_options_set_worker_threads_num(
     int worker_threads) BITCOINKERNEL_ARG_NONNULL(1);
 
 /**
+ * @brief Set block pruning mode.
+ *
+ * This follows Bitcoin Core's -prune option semantics:
+ * 0 disables pruning, 1 enables manual pruning with no target, and values
+ * greater than or equal to 550 enable automatic pruning with the provided
+ * target in MiB.
+ *
+ * @param[in] chainstate_manager_options Non-null, options to be set.
+ * @param[in] prune_mode                 Pruning mode.
+ * @return                               0 if the set was successful, non-zero if the set failed.
+ */
+BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_options_set_prune(
+    btck_ChainstateManagerOptions* chainstate_manager_options,
+    uint64_t prune_mode) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
  * @brief Sets wipe db in the options. In combination with calling
  * @ref btck_chainstate_manager_import_blocks this triggers either a full reindex,
  * or a reindex of just the chainstate database.
@@ -1206,6 +1222,46 @@ BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_p
     btck_ChainstateManager* chainstate_manager,
     const btck_Block* block,
     int* new_block) BITCOINKERNEL_ARG_NONNULL(1, 2, 3);
+
+/**
+ * @brief Trigger pruning according to the configured target.
+ *
+ * This is a no-op if the chainstate manager is in manual prune mode.
+ *
+ * @param[in] chainstate_manager Non-null.
+ * @return                       0 if pruning completed successfully, non-zero on error.
+ */
+BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_prune(
+    btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Manually prune block and undo files up to a height.
+ *
+ * Pruning is constrained by the active chain height and the minimum number of
+ * recent blocks that must be kept.
+ *
+ * @param[in] chainstate_manager Non-null.
+ * @param[in] height             The block height to prune up to.
+ * @return                       0 if pruning completed successfully, non-zero on error.
+ */
+BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_prune_to_height(
+    btck_ChainstateManager* chainstate_manager,
+    int32_t height) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Prune the block and undo file containing a block tree entry.
+ *
+ * Block and undo data are stored and deleted per blk/rev file pair. This
+ * function therefore prunes the entire file pair containing the provided
+ * entry.
+ *
+ * @param[in] chainstate_manager Non-null.
+ * @param[in] block_tree_entry   Non-null.
+ * @return                       0 if pruning completed successfully, non-zero on error.
+ */
+BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_prune_block_entry_entry(
+    btck_ChainstateManager* chainstate_manager,
+    const btck_BlockTreeEntry* block_tree_entry) BITCOINKERNEL_ARG_NONNULL(1, 2);
 
 /**
  * @brief Returns the best known currently active chain. Its lifetime is
