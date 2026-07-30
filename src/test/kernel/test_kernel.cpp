@@ -4,9 +4,6 @@
 
 #include <kernel/bitcoinkernel.h>
 #include <kernel/bitcoinkernel_wrapper.h>
-#include <kernel/chainparams.h>
-#include <primitives/block.h>
-#include <streams.h>
 #include <util/fs.h>
 
 #define BOOST_TEST_MODULE Bitcoin Kernel Test Suite
@@ -14,8 +11,9 @@
 
 #include <test/kernel/block_data.h>
 #include <test/util/common.h>
-#include <test/util/mining.h>
 
+#include <array>
+#include <cassert>
 #include <charconv>
 #include <cstdint>
 #include <cstdlib>
@@ -84,11 +82,118 @@ std::string byte_span_to_hex_string_reversed(std::span<const std::byte> bytes)
     return oss.str();
 }
 
-std::vector<std::byte> block_to_bytes(const CBlock& block)
+void append_u32(std::vector<std::byte>& out, uint32_t value)
 {
-    DataStream stream{};
-    stream << TX_WITH_WITNESS(block);
-    return {stream.begin(), stream.end()};
+    for (int i{0}; i < 4; ++i) out.push_back(std::byte{static_cast<unsigned char>(value >> (8 * i))});
+}
+
+void append_u64(std::vector<std::byte>& out, uint64_t value)
+{
+    for (int i{0}; i < 8; ++i) out.push_back(std::byte{static_cast<unsigned char>(value >> (8 * i))});
+}
+
+void append_compact_size(std::vector<std::byte>& out, uint64_t size)
+{
+    assert(size < 253);
+    out.push_back(std::byte{static_cast<unsigned char>(size)});
+}
+
+void append_bytes(std::vector<std::byte>& out, std::span<const std::byte> bytes)
+{
+    out.insert(out.end(), bytes.begin(), bytes.end());
+}
+
+std::vector<std::byte> script_num(int32_t value)
+{
+    assert(value > 0);
+    std::vector<std::byte> result;
+    while (value) {
+        result.push_back(std::byte{static_cast<unsigned char>(value & 0xff)});
+        value >>= 8;
+    }
+    if ((static_cast<unsigned char>(result.back()) & 0x80) != 0) {
+        result.push_back(std::byte{0});
+    }
+    return result;
+}
+
+void append_coinbase_height(std::vector<std::byte>& script, int32_t height)
+{
+    const auto height_bytes{script_num(height)};
+    assert(height_bytes.size() <= 75);
+    script.push_back(std::byte{static_cast<unsigned char>(height_bytes.size())});
+    append_bytes(script, height_bytes);
+}
+
+int64_t regtest_subsidy(int32_t height)
+{
+    static constexpr int64_t COIN{100000000};
+    static constexpr int32_t REGTEST_HALVING_INTERVAL{150};
+    const int halvings{height / REGTEST_HALVING_INTERVAL};
+    return halvings >= 64 ? 0 : (50 * COIN) >> halvings;
+}
+
+std::vector<std::byte> create_coinbase_tx(int32_t height)
+{
+    std::vector<std::byte> tx;
+    append_u32(tx, 2); // version
+    append_compact_size(tx, 1); // inputs
+    tx.insert(tx.end(), 32, std::byte{0}); // null prevout hash
+    append_u32(tx, 0xffffffff); // null prevout index
+
+    std::vector<std::byte> script_sig;
+    append_coinbase_height(script_sig, height);
+    script_sig.push_back(std::byte{0}); // OP_0 dummy extranonce
+    append_compact_size(tx, script_sig.size());
+    append_bytes(tx, script_sig);
+    append_u32(tx, 0xffffffff); // sequence
+
+    append_compact_size(tx, 1); // outputs
+    append_u64(tx, static_cast<uint64_t>(regtest_subsidy(height)));
+    append_compact_size(tx, 1);
+    tx.push_back(std::byte{0x51}); // OP_TRUE
+    append_u32(tx, 0); // locktime
+    return tx;
+}
+
+bool hash_meets_regtest_pow(std::span<const std::byte> hash)
+{
+    assert(hash.size() == 32);
+    static constexpr std::array<unsigned char, 32> TARGET{
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x7f};
+    for (int i{31}; i >= 0; --i) {
+        const auto actual{static_cast<unsigned char>(hash[i])};
+        if (actual < TARGET[i]) return true;
+        if (actual > TARGET[i]) return false;
+    }
+    return true;
+}
+
+std::vector<std::byte> create_regtest_block(std::span<const std::byte> prev_hash, uint32_t prev_time, int32_t height)
+{
+    assert(prev_hash.size() == 32);
+    const auto coinbase_tx{create_coinbase_tx(height)};
+    const auto merkle_root{Transaction{coinbase_tx}.Txid().ToBytes()};
+
+    std::vector<std::byte> block;
+    for (uint32_t nonce{0};; ++nonce) {
+        block.clear();
+        append_u32(block, 0x20000000); // version
+        append_bytes(block, prev_hash);
+        append_bytes(block, merkle_root);
+        append_u32(block, prev_time + 1);
+        append_u32(block, 0x207fffff); // regtest pow limit
+        append_u32(block, nonce);
+        append_compact_size(block, 1);
+        append_bytes(block, coinbase_tx);
+
+        if (hash_meets_regtest_pow(Block{block}.GetHash().ToBytes())) {
+            return block;
+        }
+    }
 }
 
 constexpr auto VERIFY_ALL_PRE_SEGWIT{ScriptVerificationFlags::P2SH | ScriptVerificationFlags::DERSIG |
@@ -1306,8 +1411,7 @@ BOOST_AUTO_TEST_CASE(btck_chainman_pruning_tests)
     auto test_directory{TestDirectory{"pruning_test_bitcoin_kernel"}};
     auto notifications{std::make_shared<TestKernelNotifications>(/*log_warnings=*/false)};
     auto context{create_context(notifications, btck::ChainType::REGTEST)};
-    auto params{CChainParams::RegTest({})};
-    const auto blocks{CreateBlockChain(1300, *params)};
+    static constexpr int32_t PRUNING_TEST_HEIGHT{1300};
 
     {
         ChainstateManagerOptions chainman_opts{
@@ -1320,15 +1424,26 @@ BOOST_AUTO_TEST_CASE(btck_chainman_pruning_tests)
 
         BOOST_CHECK(!chainman.PruneToHeight(1));
 
-        for (const auto& generated_block : blocks) {
-            Block block{block_to_bytes(*generated_block)};
+        for (const auto& raw_block : REGTEST_BLOCK_DATA) {
+            Block block{hex_string_to_byte_vec(raw_block)};
             bool new_block{false};
             BOOST_CHECK(chainman.ProcessBlock(block, &new_block));
             BOOST_CHECK(new_block);
         }
+        auto prev_hash{Block{hex_string_to_byte_vec(REGTEST_BLOCK_DATA.back())}.GetHash().ToBytes()};
+        uint32_t prev_time{Block{hex_string_to_byte_vec(REGTEST_BLOCK_DATA.back())}.GetHeader().Timestamp()};
+        for (int32_t height{static_cast<int32_t>(REGTEST_BLOCK_DATA.size()) + 1}; height <= PRUNING_TEST_HEIGHT; ++height) {
+            const auto raw_block{create_regtest_block(prev_hash, prev_time, height)};
+            Block block{raw_block};
+            bool new_block{false};
+            BOOST_CHECK(chainman.ProcessBlock(block, &new_block));
+            BOOST_CHECK(new_block);
+            prev_hash = block.GetHash().ToBytes();
+            prev_time = block.GetHeader().Timestamp();
+        }
 
         auto chain{chainman.GetChain()};
-        BOOST_CHECK_EQUAL(chain.Height(), static_cast<int32_t>(blocks.size()));
+        BOOST_CHECK_EQUAL(chain.Height(), PRUNING_TEST_HEIGHT);
         auto old_entry{chain.GetByHeight(1)};
         auto entry_for_direct_prune{chain.GetByHeight(800)};
         auto tip_entry{chain.Entries().back()};
