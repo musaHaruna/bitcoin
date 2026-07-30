@@ -114,6 +114,20 @@ public:
     }
 };
 
+class PruningTestLog
+{
+public:
+    void LogMessage(std::string_view message)
+    {
+        if (message.find("Kernel chainstate manager") != std::string_view::npos ||
+            message.find("Prune (Manual)") != std::string_view::npos ||
+            message.find("Block files have previously been pruned") != std::string_view::npos ||
+            message.find("Failed to load chain state") != std::string_view::npos) {
+            std::cout << "kernel: " << message;
+        }
+    }
+};
+
 struct TestDirectory {
     fs::path m_directory;
     TestDirectory(std::string directory_name)
@@ -131,6 +145,10 @@ struct TestDirectory {
 class TestKernelNotifications : public KernelNotifications
 {
 public:
+    explicit TestKernelNotifications(bool log_warnings = true) : m_log_warnings{log_warnings} {}
+
+    bool m_log_warnings;
+
     void HeaderTipHandler(SynchronizationState state, int64_t height, int64_t timestamp, bool presync) override
     {
         BOOST_CHECK_GT(timestamp, 0);
@@ -138,12 +156,16 @@ public:
 
     void WarningSetHandler(Warning warning, std::string_view message) override
     {
-        std::cout << "Kernel warning is set: " << message << std::endl;
+        if (m_log_warnings) {
+            std::cout << "Kernel warning is set: " << message << std::endl;
+        }
     }
 
     void WarningUnsetHandler(Warning warning) override
     {
-        std::cout << "Kernel warning was unset." << std::endl;
+        if (m_log_warnings) {
+            std::cout << "Kernel warning was unset." << std::endl;
+        }
     }
 
     void FlushErrorHandler(std::string_view error) override
@@ -1280,8 +1302,9 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
 
 BOOST_AUTO_TEST_CASE(btck_chainman_pruning_tests)
 {
+    Logger logger{std::make_unique<PruningTestLog>()};
     auto test_directory{TestDirectory{"pruning_test_bitcoin_kernel"}};
-    auto notifications{std::make_shared<TestKernelNotifications>()};
+    auto notifications{std::make_shared<TestKernelNotifications>(/*log_warnings=*/false)};
     auto context{create_context(notifications, btck::ChainType::REGTEST)};
     auto params{CChainParams::RegTest({})};
     const auto blocks{CreateBlockChain(1300, *params)};
