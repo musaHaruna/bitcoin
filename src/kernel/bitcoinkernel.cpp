@@ -28,7 +28,6 @@
 #include <sync.h>
 #include <uint256.h>
 #include <undo.h>
-#include <util/byte_units.h>
 #include <util/check.h>
 #include <util/fs.h>
 #include <util/result.h>
@@ -46,6 +45,8 @@
 #include <limits>
 #include <list>
 #include <memory>
+#include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
