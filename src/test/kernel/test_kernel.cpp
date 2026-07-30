@@ -155,45 +155,45 @@ public:
 
         auto mode{state.GetValidationMode()};
         switch (mode) {
-        case ValidationMode::VALID: {
+        case btck::ValidationMode::VALID: {
             std::cout << "Valid block" << std::endl;
             return;
         }
-        case ValidationMode::INVALID: {
+        case btck::ValidationMode::INVALID: {
             std::cout << "Invalid block: ";
             auto result{state.GetBlockValidationResult()};
             switch (result) {
-            case BlockValidationResult::UNSET:
+            case btck::BlockValidationResult::UNSET:
                 std::cout << "initial value. Block has not yet been rejected" << std::endl;
                 break;
-            case BlockValidationResult::HEADER_LOW_WORK:
+            case btck::BlockValidationResult::HEADER_LOW_WORK:
                 std::cout << "the block header may be on a too-little-work chain" << std::endl;
                 break;
-            case BlockValidationResult::CONSENSUS:
+            case btck::BlockValidationResult::CONSENSUS:
                 std::cout << "invalid by consensus rules (excluding any below reasons)" << std::endl;
                 break;
-            case BlockValidationResult::CACHED_INVALID:
+            case btck::BlockValidationResult::CACHED_INVALID:
                 std::cout << "this block was cached as being invalid and we didn't store the reason why" << std::endl;
                 break;
-            case BlockValidationResult::INVALID_HEADER:
+            case btck::BlockValidationResult::INVALID_HEADER:
                 std::cout << "invalid proof of work or time too old" << std::endl;
                 break;
-            case BlockValidationResult::MUTATED:
+            case btck::BlockValidationResult::MUTATED:
                 std::cout << "the block's data didn't match the data committed to by the PoW" << std::endl;
                 break;
-            case BlockValidationResult::MISSING_PREV:
+            case btck::BlockValidationResult::MISSING_PREV:
                 std::cout << "We don't have the previous block the checked one is built on" << std::endl;
                 break;
-            case BlockValidationResult::INVALID_PREV:
+            case btck::BlockValidationResult::INVALID_PREV:
                 std::cout << "A block this one builds on is invalid" << std::endl;
                 break;
-            case BlockValidationResult::TIME_FUTURE:
+            case btck::BlockValidationResult::TIME_FUTURE:
                 std::cout << "block timestamp was > 2 hours in the future (or our clock is bad)" << std::endl;
                 break;
             }
             return;
         }
-        case ValidationMode::INTERNAL_ERROR: {
+        case btck::ValidationMode::INTERNAL_ERROR: {
             std::cout << "Internal error" << std::endl;
             return;
         }
@@ -219,7 +219,7 @@ public:
 void run_verify_test(
     const ScriptPubkey& spent_script_pubkey,
     const Transaction& spending_tx,
-    const PrecomputedTransactionData* precomputed_txdata,
+    const btck::PrecomputedTransactionData* precomputed_txdata,
     int64_t amount,
     unsigned int input_index,
     bool taproot)
@@ -510,11 +510,11 @@ BOOST_AUTO_TEST_CASE(btck_precomputed_txdata) {
     auto tx{Transaction{tx_data}};
     auto tx_data_2{hex_string_to_byte_vec("02000000000101904f4ee5c87d20090b642f116e458cd6693292ad9ece23e72f15fb6c05b956210500000000fdffffff02e2010000000000002251200839a723933b56560487ec4d67dda58f09bae518ffa7e148313c5696ac837d9f10060000000000002251205826bcdae7abfb1c468204170eab00d887b61ab143464a4a09e1450bdc59a3340140f26e7af574e647355830772946356c27e7bbc773c5293688890f58983499581be84de40be7311a14e6d6422605df086620e75adae84ff06b75ce5894de5e994a00000000")};
     auto tx2{Transaction{tx_data_2}};
-    auto precomputed_txdata{PrecomputedTransactionData{
+    auto precomputed_txdata{btck::PrecomputedTransactionData{
         /*tx_to=*/tx,
         /*spent_outputs=*/{},
     }};
-    auto precomputed_txdata_2{PrecomputedTransactionData{
+    auto precomputed_txdata_2{btck::PrecomputedTransactionData{
         /*tx_to=*/tx2,
         /*spent_outputs=*/{},
     }};
@@ -535,7 +535,7 @@ BOOST_AUTO_TEST_CASE(btck_script_verify_tests)
         /*taproot=*/false);
 
     // Legacy transaction aca326a724eda9a461c10a876534ecd5ae7b27f10f26c3862fb996f80ea2d45d with precomputed_txdata
-    auto legacy_precomputed_txdata{PrecomputedTransactionData{
+    auto legacy_precomputed_txdata{btck::PrecomputedTransactionData{
         /*tx_to=*/legacy_spending_tx,
         /*spent_outputs=*/{},
     }};
@@ -559,7 +559,7 @@ BOOST_AUTO_TEST_CASE(btck_script_verify_tests)
         /*taproot=*/false);
 
     // Segwit transaction 1a3e89644985fbbb41e0dcfe176739813542b5937003c46a07de1e3ee7a4a7f3 with precomputed_txdata
-    auto segwit_precomputed_txdata{PrecomputedTransactionData{
+    auto segwit_precomputed_txdata{btck::PrecomputedTransactionData{
         /*tx_to=*/segwit_spending_tx,
         /*spent_outputs=*/{},
     }};
@@ -576,7 +576,7 @@ BOOST_AUTO_TEST_CASE(btck_script_verify_tests)
     auto taproot_spending_tx{Transaction{hex_string_to_byte_vec("01000000000101d1f1c1f8cdf6759167b90f52c9ad358a369f95284e841d7a2536cef31c0549580100000000fdffffff020000000000000000316a2f49206c696b65205363686e6f7272207369677320616e6420492063616e6e6f74206c69652e204062697462756734329e06010000000000225120a37c3903c8d0db6512e2b40b0dffa05e5a3ab73603ce8c9c4b7771e5412328f90140a60c383f71bac0ec919b1d7dbc3eb72dd56e7aa99583615564f9f99b8ae4e837b758773a5b2e4c51348854c8389f008e05029db7f464a5ff2e01d5e6e626174affd30a00")}};
     std::vector<TransactionOutput> taproot_spent_outputs;
     taproot_spent_outputs.emplace_back(taproot_spent_script_pubkey, 88480);
-    auto taproot_precomputed_txdata{PrecomputedTransactionData{
+    auto taproot_precomputed_txdata{btck::PrecomputedTransactionData{
         /*tx_to=*/taproot_spending_tx,
         /*spent_outputs=*/taproot_spent_outputs,
     }};
@@ -595,7 +595,7 @@ BOOST_AUTO_TEST_CASE(btck_script_verify_tests)
     std::vector<TransactionOutput> taproot2_spent_outputs;
     taproot2_spent_outputs.emplace_back(taproot2_spent_script_pubkey0, 546);
     taproot2_spent_outputs.emplace_back(taproot2_spent_script_pubkey1, 135125);
-    auto taproot2_precomputed_txdata{PrecomputedTransactionData{
+    auto taproot2_precomputed_txdata{btck::PrecomputedTransactionData{
         /*tx_to=*/taproot2_spending_tx,
         /*spent_outputs=*/taproot2_spent_outputs,
     }};
@@ -656,8 +656,8 @@ BOOST_AUTO_TEST_CASE(btck_context_tests)
 
     { // test with context options
         ContextOptions options{};
-        ChainParams params{ChainType::MAINNET};
-        ChainParams regtest_params{ChainType::REGTEST};
+        ChainParams params{btck::ChainType::MAINNET};
+        ChainParams regtest_params{btck::ChainType::REGTEST};
         CheckHandle(params, regtest_params);
         options.SetChainParams(params);
         options.SetNotifications(std::make_shared<TestKernelNotifications>());
@@ -720,7 +720,7 @@ BOOST_AUTO_TEST_CASE(btck_block)
     BOOST_CHECK_THROW(Block{empty_data}, std::runtime_error);
 }
 
-Context create_context(std::shared_ptr<TestKernelNotifications> notifications, ChainType chain_type, std::shared_ptr<TestValidationInterface> validation_interface = nullptr)
+Context create_context(std::shared_ptr<TestKernelNotifications> notifications, btck::ChainType chain_type, std::shared_ptr<TestValidationInterface> validation_interface = nullptr)
 {
     ContextOptions options{};
     ChainParams params{chain_type};
@@ -766,7 +766,7 @@ BOOST_AUTO_TEST_CASE(btck_chainman_tests)
     }
 
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::MAINNET)};
+    auto context{create_context(notifications, btck::ChainType::MAINNET)};
 
     ChainstateManagerOptions chainman_opts{context, PathToString(test_directory.m_directory), PathToString(test_directory.m_directory / "blocks")};
     chainman_opts.SetWorkerThreads(4);
@@ -806,7 +806,7 @@ std::unique_ptr<ChainMan> create_chainman(TestDirectory& test_directory,
 void chainman_reindex_test(TestDirectory& test_directory)
 {
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::MAINNET)};
+    auto context{create_context(notifications, btck::ChainType::MAINNET)};
     auto chainman{create_chainman(
         test_directory, /*reindex=*/true, /*wipe_chainstate=*/false,
         /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
@@ -851,7 +851,7 @@ void chainman_reindex_test(TestDirectory& test_directory)
 void chainman_reindex_chainstate_test(TestDirectory& test_directory)
 {
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::MAINNET)};
+    auto context{create_context(notifications, btck::ChainType::MAINNET)};
     auto chainman{create_chainman(
         test_directory, /*reindex=*/false, /*wipe_chainstate=*/true,
         /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
@@ -865,7 +865,7 @@ void chainman_mainnet_validation_test(TestDirectory& test_directory)
 {
     auto notifications{std::make_shared<TestKernelNotifications>()};
     auto validation_interface{std::make_shared<TestValidationInterface>()};
-    auto context{create_context(notifications, ChainType::MAINNET, validation_interface)};
+    auto context{create_context(notifications, btck::ChainType::MAINNET, validation_interface)};
     auto chainman{create_chainman(
         test_directory, /*reindex=*/false, /*wipe_chainstate=*/false,
         /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
@@ -936,47 +936,47 @@ BOOST_AUTO_TEST_CASE(btck_check_block_context_free)
 
     // Context-free block checks still need consensus params for the optional
     // proof-of-work validation path.
-    ChainParams mainnet_params{ChainType::MAINNET};
+    ChainParams mainnet_params{btck::ChainType::MAINNET};
     auto consensus_params = mainnet_params.GetConsensusParams();
 
     Block block{raw_block};
-    BlockValidationState state;
+    btck::BlockValidationState state;
 
-    BOOST_CHECK(block.Check(consensus_params, BlockCheckFlags::BASE, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+    BOOST_CHECK(block.Check(consensus_params, btck::BlockCheckFlags::BASE, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::VALID);
 
-    BOOST_CHECK(block.Check(consensus_params, BlockCheckFlags::ALL, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+    BOOST_CHECK(block.Check(consensus_params, btck::BlockCheckFlags::ALL, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::VALID);
 
     auto bad_merkle_block_data = raw_block;
     bad_merkle_block_data[MERKLE_ROOT_OFFSET] ^= std::byte{0x01};
     Block bad_merkle_block{bad_merkle_block_data};
 
-    BOOST_CHECK(!bad_merkle_block.Check(consensus_params, BlockCheckFlags::MERKLE, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::INVALID);
-    BOOST_CHECK(state.GetBlockValidationResult() == BlockValidationResult::MUTATED);
+    BOOST_CHECK(!bad_merkle_block.Check(consensus_params, btck::BlockCheckFlags::MERKLE, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::INVALID);
+    BOOST_CHECK(state.GetBlockValidationResult() == btck::BlockValidationResult::MUTATED);
 
-    BOOST_CHECK(bad_merkle_block.Check(consensus_params, BlockCheckFlags::BASE, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+    BOOST_CHECK(bad_merkle_block.Check(consensus_params, btck::BlockCheckFlags::BASE, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::VALID);
 
     auto bad_pow_block_data = raw_block;
     bad_pow_block_data[NBITS_OFFSET + 3] = std::byte{0x1c};
     Block bad_pow_block{bad_pow_block_data};
 
-    BOOST_CHECK(!bad_pow_block.Check(consensus_params, BlockCheckFlags::POW, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::INVALID);
-    BOOST_CHECK(state.GetBlockValidationResult() == BlockValidationResult::INVALID_HEADER);
+    BOOST_CHECK(!bad_pow_block.Check(consensus_params, btck::BlockCheckFlags::POW, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::INVALID);
+    BOOST_CHECK(state.GetBlockValidationResult() == btck::BlockValidationResult::INVALID_HEADER);
 
-    BOOST_CHECK(bad_pow_block.Check(consensus_params, BlockCheckFlags::MERKLE, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+    BOOST_CHECK(bad_pow_block.Check(consensus_params, btck::BlockCheckFlags::MERKLE, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::VALID);
 
     auto bad_base_block_data = raw_block;
     bad_base_block_data[COINBASE_PREVOUT_N_OFFSET] = std::byte{0x00};
     Block bad_base_block{bad_base_block_data};
 
-    BOOST_CHECK(!bad_base_block.Check(consensus_params, BlockCheckFlags::BASE, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::INVALID);
-    BOOST_CHECK(state.GetBlockValidationResult() == BlockValidationResult::CONSENSUS);
+    BOOST_CHECK(!bad_base_block.Check(consensus_params, btck::BlockCheckFlags::BASE, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::INVALID);
+    BOOST_CHECK(state.GetBlockValidationResult() == btck::BlockValidationResult::CONSENSUS);
 
     // Test with invalid truncated block data.
     auto truncated_block_data = hex_string_to_byte_vec("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299");
@@ -1011,7 +1011,7 @@ BOOST_AUTO_TEST_CASE(btck_block_tree_entry_tests)
 {
     auto test_directory{TestDirectory{"block_tree_entry_test_bitcoin_kernel"}};
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::REGTEST)};
+    auto context{create_context(notifications, btck::ChainType::REGTEST)};
     auto chainman{create_chainman(
         test_directory,
         /*reindex=*/false,
@@ -1059,7 +1059,7 @@ BOOST_AUTO_TEST_CASE(btck_chainman_in_memory_tests)
     auto in_memory_test_directory{TestDirectory{"in-memory_test_bitcoin_kernel"}};
 
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::REGTEST)};
+    auto context{create_context(notifications, btck::ChainType::REGTEST)};
     auto chainman{create_chainman(
         in_memory_test_directory, /*reindex=*/false, /*wipe_chainstate=*/false,
         /*block_tree_db_in_memory=*/true, /*chainstate_db_in_memory=*/true, context)};
@@ -1083,7 +1083,7 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
     auto test_directory{TestDirectory{"regtest_test_bitcoin_kernel"}};
 
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::REGTEST)};
+    auto context{create_context(notifications, btck::ChainType::REGTEST)};
 
     {
         auto chainman{create_chainman(
@@ -1092,10 +1092,10 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
         for (const auto& data : REGTEST_BLOCK_DATA) {
             Block block{hex_string_to_byte_vec(data)};
             BlockHeader header = block.GetHeader();
-            BlockValidationState state{};
-            BOOST_CHECK(state.GetBlockValidationResult() == BlockValidationResult::UNSET);
+            btck::BlockValidationState state{};
+            BOOST_CHECK(state.GetBlockValidationResult() == btck::BlockValidationResult::UNSET);
             BOOST_CHECK(chainman->ProcessBlockHeader(header, state));
-            BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+            BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::VALID);
             BlockTreeEntry entry{*chainman->GetBlockTreeEntry(header.Hash())};
             BOOST_CHECK(!chainman->GetChain().Contains(entry));
             BlockTreeEntry best_entry{chainman->GetBestEntry()};
@@ -1141,8 +1141,8 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
     auto read_block_2 = chainman->ReadBlock(tip_2).value();
     check_equal(read_block_2.ToBytes(), hex_string_to_byte_vec(REGTEST_BLOCK_DATA[REGTEST_BLOCK_DATA.size() - 2]));
 
-    Txid txid = read_block.Transactions()[0].Txid();
-    Txid txid_2 = read_block_2.Transactions()[0].Txid();
+    btck::Txid txid = read_block.Transactions()[0].Txid();
+    btck::Txid txid_2 = read_block_2.Transactions()[0].Txid();
     BOOST_CHECK(txid != txid_2);
     BOOST_CHECK(txid == txid);
     CheckHandle(txid, txid_2);
@@ -1179,7 +1179,7 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
             }
             BOOST_CHECK(inputs.size() == spent_outputs.size());
             ScriptVerifyStatus status = ScriptVerifyStatus::OK;
-            const PrecomputedTransactionData precomputed_txdata{transaction, spent_outputs};
+            const btck::PrecomputedTransactionData precomputed_txdata{transaction, spent_outputs};
             for (size_t i{0}; i < inputs.size(); ++i) {
                 BOOST_CHECK(spent_outputs[i].GetScriptPubkey().Verify(spent_outputs[i].Amount(), transaction, &precomputed_txdata, i, ScriptVerificationFlags::ALL, status));
             }
@@ -1203,8 +1203,8 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
     // Get the last coin from the transaction spent outputs
     CoinView coin{transaction_spent_outputs.GetCoin(transaction_spent_outputs.Count() - 1)};
     BOOST_CHECK(!coin.IsCoinbase());
-    Coin owned_coin{coin};
-    Coin owned_coin_prev{owned_transaction_spent_outputs_prev.GetCoin(owned_transaction_spent_outputs_prev.Count() - 1)};
+    btck::Coin owned_coin{coin};
+    btck::Coin owned_coin_prev{owned_transaction_spent_outputs_prev.GetCoin(owned_transaction_spent_outputs_prev.Count() - 1)};
     CheckHandle(owned_coin, owned_coin_prev);
 
     // Validate coin properties
