@@ -1483,7 +1483,7 @@ BOOST_AUTO_TEST_CASE(btck_chainman_pruning_tests)
         BOOST_REQUIRE(chainman.ReadBlock(entry_for_direct_prune));
         BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
         BOOST_CHECK(chainman.Prune());
-        BOOST_CHECK(chainman.PruneBlockEntry(entry_for_direct_prune));
+        BOOST_CHECK(chainman.GetBlockManager().PruneBlockEntry(entry_for_direct_prune));
         BOOST_CHECK(!chainman.ReadBlock(entry_for_direct_prune));
         BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
     }

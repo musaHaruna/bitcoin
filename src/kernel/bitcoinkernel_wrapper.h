@@ -1252,10 +1252,20 @@ public:
     MAKE_RANGE_METHOD(TxsSpentOutputs, BlockSpentOutputs, &BlockSpentOutputs::Count, &BlockSpentOutputs::GetTxSpentOutputs, *this)
 };
 
-class BlockManagerView : public View<btck_BlockManager>
+class BlockManagerView
 {
+private:
+    btck_BlockManager* m_ptr;
+
 public:
-    explicit BlockManagerView(btck_BlockManager* ptr) : View{ptr} {}
+    explicit BlockManagerView(btck_BlockManager* ptr) : m_ptr{check(ptr)} {}
+
+    btck_BlockManager* get() const { return m_ptr; }
+
+    bool PruneBlockEntry(const BlockTreeEntry& entry)
+    {
+        return btck_block_manager_prune_block_entry(get(), entry.get()) == 0;
+    }
 };
 
 class ChainMan : UniqueHandle<btck_ChainstateManager, btck_chainstate_manager_destroy>
@@ -1301,11 +1311,6 @@ public:
     bool PruneToHeight(int32_t height)
     {
         return btck_chainstate_manager_prune_to_height(get(), height) == 0;
-    }
-
-    bool PruneBlockEntry(const BlockTreeEntry& entry)
-    {
-        return btck_chainstate_manager_prune_block_entry_entry(get(), entry.get()) == 0;
     }
 
     BlockManagerView GetBlockManager()

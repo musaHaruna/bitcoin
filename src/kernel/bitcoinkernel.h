@@ -1272,12 +1272,12 @@ BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_p
  * function therefore prunes the entire file pair containing the provided
  * entry.
  *
- * @param[in] chainstate_manager Non-null.
- * @param[in] block_tree_entry   Non-null.
+ * @param[in] block_manager    Non-null.
+ * @param[in] block_tree_entry Non-null.
  * @return                       0 if pruning completed successfully, non-zero on error.
  */
-BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_prune_block_entry_entry(
-    btck_ChainstateManager* chainstate_manager,
+BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_block_manager_prune_block_entry(
+    btck_BlockManager* block_manager,
     const btck_BlockTreeEntry* block_tree_entry) BITCOINKERNEL_ARG_NONNULL(1, 2);
 
 /**

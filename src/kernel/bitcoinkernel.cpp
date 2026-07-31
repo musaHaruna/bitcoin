@@ -1491,18 +1491,18 @@ int btck_chainstate_manager_prune_to_height(btck_ChainstateManager* chainstate_m
     }
 }
 
-int btck_chainstate_manager_prune_block_entry_entry(
-    btck_ChainstateManager* chainstate_manager,
+int btck_block_manager_prune_block_entry(
+    btck_BlockManager* block_manager,
     const btck_BlockTreeEntry* block_tree_entry)
 {
     try {
-        auto& chainman{*btck_ChainstateManager::get(chainstate_manager).m_chainman};
-        if (!chainman.m_blockman.IsPruneMode()) {
-            LogError("Cannot prune blocks because the chainstate manager is not in prune mode.");
+        auto& blockman{btck_BlockManager::get(block_manager)};
+        if (!blockman.IsPruneMode()) {
+            LogError("Cannot prune blocks because the block manager is not in prune mode.");
             return -1;
         }
 
-        LOCK(chainman.GetMutex());
+        LOCK(::cs_main);
         const CBlockIndex& block_index{btck_BlockTreeEntry::get(block_tree_entry)};
         if (!(block_index.nStatus & BLOCK_HAVE_DATA)) {
             return 0;
@@ -1513,10 +1513,10 @@ int btck_chainstate_manager_prune_block_entry_entry(
             return -1;
         }
 
-        LogInfo("Kernel chainstate manager block entry prune requested: height=%d file=%d hash=%s",
+        LogInfo("Kernel block manager block entry prune requested: height=%d file=%d hash=%s",
                 block_index.nHeight, file_number, block_index.GetBlockHash().ToString());
-        chainman.m_blockman.PruneBlockFile(file_number);
-        LogInfo("Kernel chainstate manager block entry prune completed: file=%d", file_number);
+        blockman.PruneBlockFile(file_number);
+        LogInfo("Kernel block manager block entry prune completed: file=%d", file_number);
         return 0;
     } catch (const std::exception& e) {
         LogError("Failed to prune block tree entry: %s", e.what());
