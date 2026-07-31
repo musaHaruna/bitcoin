@@ -227,6 +227,14 @@ typedef struct btck_ChainstateManager btck_ChainstateManager;
 typedef struct btck_BlockManager btck_BlockManager;
 
 /**
+ * Opaque data structure holding chain-derived pruning limits.
+ *
+ * This is a snapshot of pruning facts from a chainstate manager. It should be
+ * used promptly with the block manager returned by the same chainstate manager.
+ */
+typedef struct btck_PruneContext btck_PruneContext;
+
+/**
  * Opaque data structure for holding a block.
  */
 typedef struct btck_Block btck_Block;
@@ -1241,29 +1249,47 @@ BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_p
     int* new_block) BITCOINKERNEL_ARG_NONNULL(1, 2, 3);
 
 /**
- * @brief Trigger pruning according to the configured target.
- *
- * This is a no-op if the chainstate manager is in manual prune mode.
+ * @brief Make a pruning context for the active chainstate.
  *
  * @param[in] chainstate_manager Non-null.
- * @return                       0 if pruning completed successfully, non-zero on error.
+ * @return                       The allocated pruning context, or null on error.
  */
-BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_prune(
+BITCOINKERNEL_API btck_PruneContext* BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_make_prune_context(
     btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * Destroy a pruning context.
+ */
+BITCOINKERNEL_API void btck_prune_context_destroy(btck_PruneContext* prune_context);
+
+/**
+ * @brief Trigger pruning according to the configured target.
+ *
+ * This is a no-op if the block manager is in manual prune mode.
+ *
+ * @param[in] block_manager Non-null.
+ * @param[in] prune_context Non-null.
+ * @return                  0 if pruning completed successfully, non-zero on error.
+ */
+BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_block_manager_prune(
+    btck_BlockManager* block_manager,
+    const btck_PruneContext* prune_context) BITCOINKERNEL_ARG_NONNULL(1, 2);
 
 /**
  * @brief Manually prune block and undo files up to a height.
  *
- * Pruning is constrained by the active chain height and the minimum number of
- * recent blocks that must be kept.
+ * Pruning is constrained by the pruning context's active chain height and the
+ * minimum number of recent blocks that must be kept.
  *
- * @param[in] chainstate_manager Non-null.
- * @param[in] height             The block height to prune up to.
- * @return                       0 if pruning completed successfully, non-zero on error.
+ * @param[in] block_manager Non-null.
+ * @param[in] prune_context Non-null.
+ * @param[in] height        The block height to prune up to.
+ * @return                  0 if pruning completed successfully, non-zero on error.
  */
-BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_prune_to_height(
-    btck_ChainstateManager* chainstate_manager,
-    int32_t height) BITCOINKERNEL_ARG_NONNULL(1);
+BITCOINKERNEL_API int BITCOINKERNEL_WARN_UNUSED_RESULT btck_block_manager_prune_to_height(
+    btck_BlockManager* block_manager,
+    const btck_PruneContext* prune_context,
+    int32_t height) BITCOINKERNEL_ARG_NONNULL(1, 2);
 
 /**
  * @brief Prune the block and undo file containing a block tree entry.

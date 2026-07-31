@@ -1422,7 +1422,9 @@ BOOST_AUTO_TEST_CASE(btck_chainman_pruning_tests)
         BOOST_CHECK_EQUAL(btck_chainstate_manager_options_set_fast_prune_for_testing(chainman_opts.get(), 1), 0);
         ChainMan chainman{context, chainman_opts};
 
-        BOOST_CHECK(!chainman.PruneToHeight(1));
+        auto early_blockman{chainman.GetBlockManager()};
+        auto early_prune_context{chainman.MakePruneContext()};
+        BOOST_CHECK(!early_blockman.PruneToHeight(early_prune_context, 1));
 
         for (const auto& raw_block : REGTEST_BLOCK_DATA) {
             Block block{hex_string_to_byte_vec(raw_block)};
@@ -1451,11 +1453,13 @@ BOOST_AUTO_TEST_CASE(btck_chainman_pruning_tests)
         BOOST_REQUIRE(chainman.ReadBlock(entry_for_direct_prune));
         BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
 
-        BOOST_CHECK(chainman.PruneToHeight(700));
+        auto blockman{chainman.GetBlockManager()};
+        auto prune_context{chainman.MakePruneContext()};
+        BOOST_CHECK(blockman.PruneToHeight(prune_context, 700));
         BOOST_CHECK(!chainman.ReadBlock(old_entry));
         BOOST_REQUIRE(chainman.ReadBlock(entry_for_direct_prune));
         BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
-        BOOST_CHECK(chainman.Prune());
+        BOOST_CHECK(blockman.Prune(prune_context));
     }
 
     {
@@ -1482,8 +1486,10 @@ BOOST_AUTO_TEST_CASE(btck_chainman_pruning_tests)
         BOOST_CHECK(!chainman.ReadBlock(old_entry));
         BOOST_REQUIRE(chainman.ReadBlock(entry_for_direct_prune));
         BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
-        BOOST_CHECK(chainman.Prune());
-        BOOST_CHECK(chainman.GetBlockManager().PruneBlockEntry(entry_for_direct_prune));
+        auto blockman{chainman.GetBlockManager()};
+        auto prune_context{chainman.MakePruneContext()};
+        BOOST_CHECK(blockman.Prune(prune_context));
+        BOOST_CHECK(blockman.PruneBlockEntry(entry_for_direct_prune));
         BOOST_CHECK(!chainman.ReadBlock(entry_for_direct_prune));
         BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
     }

@@ -1252,6 +1252,12 @@ public:
     MAKE_RANGE_METHOD(TxsSpentOutputs, BlockSpentOutputs, &BlockSpentOutputs::Count, &BlockSpentOutputs::GetTxSpentOutputs, *this)
 };
 
+class PruneContext : public UniqueHandle<btck_PruneContext, btck_prune_context_destroy>
+{
+public:
+    explicit PruneContext(btck_PruneContext* ptr) : UniqueHandle{ptr} {}
+};
+
 class BlockManagerView
 {
 private:
@@ -1261,6 +1267,16 @@ public:
     explicit BlockManagerView(btck_BlockManager* ptr) : m_ptr{check(ptr)} {}
 
     btck_BlockManager* get() const { return m_ptr; }
+
+    bool Prune(const PruneContext& context)
+    {
+        return btck_block_manager_prune(get(), context.get()) == 0;
+    }
+
+    bool PruneToHeight(const PruneContext& context, int32_t height)
+    {
+        return btck_block_manager_prune_to_height(get(), context.get(), height) == 0;
+    }
 
     bool PruneBlockEntry(const BlockTreeEntry& entry)
     {
@@ -1303,19 +1319,14 @@ public:
         return btck_chainstate_manager_process_block_header(get(), header.get(), state.get()) == 0;
     }
 
-    bool Prune()
-    {
-        return btck_chainstate_manager_prune(get()) == 0;
-    }
-
-    bool PruneToHeight(int32_t height)
-    {
-        return btck_chainstate_manager_prune_to_height(get(), height) == 0;
-    }
-
     BlockManagerView GetBlockManager()
     {
         return BlockManagerView{btck_chainstate_manager_get_block_manager(get())};
+    }
+
+    PruneContext MakePruneContext()
+    {
+        return PruneContext{btck_chainstate_manager_make_prune_context(get())};
     }
 
     ChainView GetChain() const
