@@ -13,6 +13,7 @@
 #include <kernel/chainparams.h>
 #include <kernel/cs_main.h>
 #include <kernel/messagestartchars.h>
+#include <kernel/types.h>
 #include <primitives/block.h>
 #include <serialize.h>
 #include <streams.h>
@@ -150,6 +151,17 @@ struct PruneLockInfo {
     int height_first{std::numeric_limits<int>::max()};
 };
 
+struct PruneContext {
+    int chain_height{-1};
+    int first_block_to_prune{0};
+    int last_block_to_prune{0};
+    bool is_ibd{false};
+    bool has_historical_chainstate{false};
+    uint64_t target_sync_height{0};
+    uint64_t prune_after_height{0};
+    kernel::ChainstateRole chain_role;
+};
+
 enum BlockfileType {
     // Values used as array indexes - do not change carelessly.
     NORMAL = 0,
@@ -230,8 +242,7 @@ private:
     /* Calculate the block/rev files to delete based on height specified by user with RPC command pruneblockchain */
     void FindFilesToPruneManual(
         std::set<int>& setFilesToPrune,
-        int nManualPruneHeight,
-        const Chainstate& chain);
+        const PruneContext& prune_context);
 
     /**
      * Prune block and undo files (blk???.dat and rev???.dat) so that the disk space used is less than a user-defined target.
@@ -247,13 +258,11 @@ private:
      * A db flag records the fact that at least some block files have been pruned.
      *
      * @param[out]   setFilesToPrune   The set of file indices that can be unlinked will be returned
-     * @param        last_prune        The last height we're able to prune, according to the prune locks
+     * @param        prune_context     The height range and chain data needed to select prune files
      */
     void FindFilesToPrune(
         std::set<int>& setFilesToPrune,
-        int last_prune,
-        const Chainstate& chain,
-        ChainstateManager& chainman);
+        const PruneContext& prune_context);
 
     RecursiveMutex cs_LastBlockFile;
 

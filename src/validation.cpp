@@ -2738,14 +2738,27 @@ bool Chainstate::FlushStateToDisk(
             if (nManualPruneHeight > 0) {
                 LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune (manual)", BCLog::BENCH);
 
-                m_blockman.FindFilesToPruneManual(
-                    setFilesToPrune,
-                    std::min(last_prune, nManualPruneHeight),
-                    *this);
+                const auto [first_block_to_prune, last_block_to_prune]{GetPruneRange(std::min(last_prune, nManualPruneHeight))};
+                m_blockman.FindFilesToPruneManual(setFilesToPrune, node::PruneContext{
+                    .chain_height = m_chain.Height(),
+                    .first_block_to_prune = first_block_to_prune,
+                    .last_block_to_prune = last_block_to_prune,
+                    .chain_role = GetRole(),
+                });
             } else {
                 LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune", BCLog::BENCH);
 
-                m_blockman.FindFilesToPrune(setFilesToPrune, last_prune, *this, m_chainman);
+                const auto [first_block_to_prune, last_block_to_prune]{GetPruneRange(last_prune)};
+                m_blockman.FindFilesToPrune(setFilesToPrune, node::PruneContext{
+                    .chain_height = m_chain.Height(),
+                    .first_block_to_prune = first_block_to_prune,
+                    .last_block_to_prune = last_block_to_prune,
+                    .is_ibd = m_chainman.IsInitialBlockDownload(),
+                    .has_historical_chainstate = m_chainman.HistoricalChainstate() != nullptr,
+                    .target_sync_height = static_cast<uint64_t>(Assert(m_chainman.m_best_header)->nHeight),
+                    .prune_after_height = m_chainman.GetParams().PruneAfterHeight(),
+                    .chain_role = GetRole(),
+                });
                 m_blockman.m_check_for_pruning = false;
             }
             if (!setFilesToPrune.empty()) {
