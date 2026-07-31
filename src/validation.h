@@ -998,7 +998,7 @@ protected:
 public:
     using Options = kernel::ChainstateManagerOpts;
 
-    explicit ChainstateManager(const util::SignalInterrupt& interrupt, Options options, node::BlockManager::Options blockman_options);
+    explicit ChainstateManager(const util::SignalInterrupt& interrupt, Options options, node::BlockManager& blockman);
 
     //! Function to restart active indexes; set dynamically to avoid a circular
     //! dependency on `base/index.cpp`.
@@ -1035,7 +1035,7 @@ public:
     const Options m_options;
     //! A single BlockManager instance is shared across each constructed
     //! chainstate to avoid duplicating block metadata.
-    node::BlockManager m_blockman;
+    node::BlockManager& m_blockman;
 
     ValidationCache m_validation_cache;
 

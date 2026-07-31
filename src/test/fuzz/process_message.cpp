@@ -39,6 +39,7 @@ void ResetChainman(TestingSetup& setup)
 {
     SetMockTime(setup.m_node.chainman->GetParams().GenesisBlock().Time());
     setup.m_node.chainman.reset();
+    setup.m_node.blockman.reset();
     setup.m_make_chainman();
     setup.LoadVerifyActivateChainstate();
     for (int i = 0; i < 2 * COINBASE_MATURITY; i++) {
