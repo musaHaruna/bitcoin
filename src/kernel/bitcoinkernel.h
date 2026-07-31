@@ -219,6 +219,14 @@ typedef struct btck_ChainstateManagerOptions btck_ChainstateManagerOptions;
 typedef struct btck_ChainstateManager btck_ChainstateManager;
 
 /**
+ * Opaque data structure for holding a block manager.
+ *
+ * The block manager owns block and undo file storage and the in-memory block
+ * index entries describing that storage.
+ */
+typedef struct btck_BlockManager btck_BlockManager;
+
+/**
  * Opaque data structure for holding a block.
  */
 typedef struct btck_Block btck_Block;
@@ -1161,6 +1169,15 @@ BITCOINKERNEL_API void btck_chainstate_manager_options_destroy(btck_ChainstateMa
  */
 BITCOINKERNEL_API btck_ChainstateManager* BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_create(
     const btck_ChainstateManagerOptions* chainstate_manager_options) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Get the block manager owned by a chainstate manager.
+ *
+ * @param[in] chainstate_manager Non-null.
+ * @return                       The block manager.
+ */
+BITCOINKERNEL_API btck_BlockManager* BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_get_block_manager(
+    btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
 
 /**
  * @brief Get the btck_BlockTreeEntry whose associated btck_BlockHeader has the most

@@ -504,6 +504,7 @@ struct btck_Context : Handle<btck_Context, std::shared_ptr<const Context>> {};
 struct btck_ChainParameters : Handle<btck_ChainParameters, CChainParams> {};
 struct btck_ChainstateManagerOptions : Handle<btck_ChainstateManagerOptions, ChainstateManagerOptions> {};
 struct btck_ChainstateManager : Handle<btck_ChainstateManager, ChainMan> {};
+struct btck_BlockManager : Handle<btck_BlockManager, node::BlockManager> {};
 struct btck_Chain : Handle<btck_Chain, CChain> {};
 struct btck_BlockSpentOutputs : Handle<btck_BlockSpentOutputs, std::shared_ptr<CBlockUndo>> {};
 struct btck_TransactionSpentOutputs : Handle<btck_TransactionSpentOutputs, CTxUndo> {};
@@ -1108,6 +1109,11 @@ btck_ChainstateManager* btck_chainstate_manager_create(
     }
 
     return btck_ChainstateManager::create(std::move(blockman), std::move(chainman), opts.m_context);
+}
+
+btck_BlockManager* btck_chainstate_manager_get_block_manager(btck_ChainstateManager* chainstate_manager)
+{
+    return btck_BlockManager::ref(&btck_ChainstateManager::get(chainstate_manager).m_chainman->m_blockman);
 }
 
 const btck_BlockTreeEntry* btck_chainstate_manager_get_block_tree_entry_by_hash(const btck_ChainstateManager* chainman, const btck_BlockHash* block_hash)
