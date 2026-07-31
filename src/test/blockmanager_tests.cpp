@@ -27,6 +27,15 @@ using node::MAX_BLOCKFILE_SIZE;
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
 
+struct PruningTestChain100Setup : public TestChain100Setup {
+    PruningTestChain100Setup()
+        : TestChain100Setup{
+              ChainType::REGTEST,
+              {.extra_args = {"-prune=1", "-fastprune"}}}
+    {
+    }
+};
+
 BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
 {
     const auto params {CreateChainParams(ArgsManager{}, ChainType::MAIN)};
@@ -98,6 +107,40 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_scan_unlink_already_pruned_files, TestChain
     const int new_file_number{WITH_LOCK(chainman.GetMutex(), return new_tip->GetBlockPos().nFile)};
     const FlatFilePos new_pos(new_file_number, 0);
     BOOST_CHECK(!blockman.OpenBlockFile(new_pos, true).IsNull());
+}
+
+BOOST_FIXTURE_TEST_CASE(blockmanager_prune_files_manual, PruningTestChain100Setup)
+{
+    auto& chainman{*Assert(m_node.chainman)};
+    auto& blockman{chainman.m_blockman};
+    const CBlockIndex* old_tip{WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChain().Tip())};
+    const int file_number{WITH_LOCK(chainman.GetMutex(), return old_tip->GetBlockPos().nFile)};
+    WITH_LOCK(chainman.GetMutex(), blockman.GetBlockFileInfo(file_number)->nSize = MAX_BLOCKFILE_SIZE);
+    CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+
+    LOCK(chainman.GetMutex());
+    const CBlockIndex* new_tip{chainman.ActiveChain().Tip()};
+    BOOST_REQUIRE_NE(file_number, new_tip->GetBlockPos().nFile);
+    const FlatFilePos old_pos{file_number, 0};
+    BOOST_REQUIRE(!blockman.OpenBlockFile(old_pos, true).IsNull());
+
+    BOOST_CHECK(blockman.PruneFiles(node::PruneContext{
+        .chain_height = new_tip->nHeight,
+        .first_block_to_prune = 0,
+        .last_block_to_prune = old_tip->nHeight,
+        .chain_role = chainman.ActiveChainstate().GetRole(),
+    }, node::PruneFilesMode::Manual));
+
+    BOOST_CHECK(blockman.m_have_pruned);
+    BOOST_CHECK(!(old_tip->nStatus & BLOCK_HAVE_DATA));
+    BOOST_CHECK(!(old_tip->nStatus & BLOCK_HAVE_UNDO));
+    BOOST_CHECK(blockman.OpenBlockFile(old_pos, true).IsNull());
+    BOOST_CHECK(!blockman.PruneFiles(node::PruneContext{
+        .chain_height = new_tip->nHeight,
+        .first_block_to_prune = 0,
+        .last_block_to_prune = old_tip->nHeight,
+        .chain_role = chainman.ActiveChainstate().GetRole(),
+    }, node::PruneFilesMode::Manual));
 }
 
 BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_availability, TestChain100Setup)
