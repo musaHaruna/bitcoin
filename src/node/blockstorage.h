@@ -162,6 +162,11 @@ struct PruneContext {
     kernel::ChainstateRole chain_role;
 };
 
+enum class PruneFilesMode {
+    Manual,
+    Target,
+};
+
 enum BlockfileType {
     // Values used as array indexes - do not change carelessly.
     NORMAL = 0,
@@ -263,6 +268,9 @@ private:
     void FindFilesToPrune(
         std::set<int>& setFilesToPrune,
         const PruneContext& prune_context);
+
+    //! Persist block index state for pruned files and unlink them from disk.
+    void ApplyPrunedFiles(const std::set<int>& setFilesToPrune) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     RecursiveMutex cs_LastBlockFile;
 
@@ -384,6 +392,12 @@ public:
     //! Mark one block file as pruned (modify associated database entries)
     void PruneOneBlockFile(int fileNumber) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    //! Mark one block file as pruned, persist the block index state, and unlink it from disk.
+    void PruneBlockFile(int file_number) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    //! Select, mark, persist, and unlink block files that are safe to prune.
+    [[nodiscard]] bool PruneFiles(const PruneContext& prune_context, PruneFilesMode mode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     CBlockIndex* LookupBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     const CBlockIndex* LookupBlockIndex(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
@@ -468,6 +482,9 @@ public:
 
     //! Delete a prune lock identified by its name. Returns true if the lock existed.
     bool DeletePruneLock(const std::string& name) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    //! Return the highest block height allowed by prune locks.
+    [[nodiscard]] int GetPruneLockLimit(int chain_height) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Open a block file (blk?????.dat) */
     AutoFile OpenBlockFile(const FlatFilePos& pos, bool fReadOnly) const;

@@ -1392,17 +1392,35 @@ int btck_chainstate_manager_prune(btck_ChainstateManager* chainstate_manager)
 {
     try {
         auto& chainman{*btck_ChainstateManager::get(chainstate_manager).m_chainman};
-        if (!chainman.m_blockman.IsPruneMode()) {
+        auto& blockman{chainman.m_blockman};
+        if (!blockman.IsPruneMode()) {
             LogError("Cannot prune blocks because the chainstate manager is not in prune mode.");
             return -1;
         }
-        if (chainman.m_blockman.GetPruneTarget() == node::BlockManager::PRUNE_TARGET_MANUAL) {
+        if (blockman.GetPruneTarget() == node::BlockManager::PRUNE_TARGET_MANUAL) {
             LogInfo("Kernel chainstate manager target prune skipped: manual prune mode has no target.");
             return 0;
         }
         LogInfo("Kernel chainstate manager target prune requested: target=%dMiB",
-                chainman.m_blockman.GetPruneTarget() / 1_MiB);
-        chainman.ActiveChainstate().PruneAndFlush();
+                blockman.GetPruneTarget() / 1_MiB);
+        LOCK(chainman.GetMutex());
+        Chainstate& active_chainstate{chainman.ActiveChainstate()};
+        const int chain_height{active_chainstate.m_chain.Height()};
+        const int last_prune{blockman.GetPruneLockLimit(chain_height)};
+        const auto [first_block_to_prune, last_block_to_prune]{active_chainstate.GetPruneRange(last_prune)};
+        const bool pruned{blockman.PruneFiles(node::PruneContext{
+            .chain_height = chain_height,
+            .first_block_to_prune = first_block_to_prune,
+            .last_block_to_prune = last_block_to_prune,
+            .is_ibd = chainman.IsInitialBlockDownload(),
+            .has_historical_chainstate = chainman.HistoricalChainstate() != nullptr,
+            .target_sync_height = static_cast<uint64_t>(Assert(chainman.m_best_header)->nHeight),
+            .prune_after_height = chainman.GetParams().PruneAfterHeight(),
+            .chain_role = active_chainstate.GetRole(),
+        }, node::PruneFilesMode::Target)};
+        if (pruned) {
+            active_chainstate.ForceFlushStateToDisk(/*wipe_cache=*/false);
+        }
         LogInfo("Kernel chainstate manager target prune completed.");
         return 0;
     } catch (const std::exception& e) {
@@ -1415,7 +1433,8 @@ int btck_chainstate_manager_prune_to_height(btck_ChainstateManager* chainstate_m
 {
     try {
         auto& chainman{*btck_ChainstateManager::get(chainstate_manager).m_chainman};
-        if (!chainman.m_blockman.IsPruneMode()) {
+        auto& blockman{chainman.m_blockman};
+        if (!blockman.IsPruneMode()) {
             LogError("Cannot prune blocks because the chainstate manager is not in prune mode.");
             return -1;
         }
@@ -1446,7 +1465,18 @@ int btck_chainstate_manager_prune_to_height(btck_ChainstateManager* chainstate_m
         }
         LogInfo("Kernel chainstate manager manual prune requested: requested_height=%d actual_height=%d chain_height=%d",
                 height, prune_height, chain_height);
-        PruneBlockFilesManual(active_chainstate, prune_height);
+        const int last_prune{blockman.GetPruneLockLimit(chain_height)};
+        const auto [first_block_to_prune, last_block_to_prune]{active_chainstate.GetPruneRange(std::min<int>(last_prune, prune_height))};
+        const bool pruned{blockman.PruneFiles(node::PruneContext{
+            .chain_height = chain_height,
+            .first_block_to_prune = first_block_to_prune,
+            .last_block_to_prune = last_block_to_prune,
+            .prune_after_height = chainman.GetParams().PruneAfterHeight(),
+            .chain_role = active_chainstate.GetRole(),
+        }, node::PruneFilesMode::Manual)};
+        if (pruned) {
+            active_chainstate.ForceFlushStateToDisk(/*wipe_cache=*/false);
+        }
         LogInfo("Kernel chainstate manager manual prune completed: actual_height=%d", prune_height);
         return 0;
     } catch (const std::exception& e) {
@@ -1479,13 +1509,7 @@ int btck_chainstate_manager_prune_block_entry_entry(
 
         LogInfo("Kernel chainstate manager block entry prune requested: height=%d file=%d hash=%s",
                 block_index.nHeight, file_number, block_index.GetBlockHash().ToString());
-        chainman.m_blockman.PruneOneBlockFile(file_number);
-        if (!chainman.m_blockman.m_have_pruned) {
-            chainman.m_blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true);
-            chainman.m_blockman.m_have_pruned = true;
-        }
-        chainman.m_blockman.WriteBlockIndexDB();
-        chainman.m_blockman.UnlinkPrunedFiles({file_number});
+        chainman.m_blockman.PruneBlockFile(file_number);
         LogInfo("Kernel chainstate manager block entry prune completed: file=%d", file_number);
         return 0;
     } catch (const std::exception& e) {

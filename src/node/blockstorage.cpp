@@ -171,6 +171,9 @@ std::string CBlockFileInfo::ToString() const
 
 namespace node {
 
+/** The number of blocks to keep below the deepest prune lock. */
+static constexpr int PRUNE_LOCK_BUFFER{10};
+
 bool CBlockIndexWorkComparator::operator()(const CBlockIndex* pa, const CBlockIndex* pb) const
 {
     // First sort by most total work, ...
@@ -400,6 +403,72 @@ bool BlockManager::DeletePruneLock(const std::string& name)
 {
     AssertLockHeld(::cs_main);
     return m_prune_locks.erase(name) > 0;
+}
+
+int BlockManager::GetPruneLockLimit(int chain_height) const
+{
+    AssertLockHeld(::cs_main);
+    int last_prune{chain_height};
+    std::optional<std::string> limiting_lock;
+
+    for (const auto& prune_lock : m_prune_locks) {
+        if (prune_lock.second.height_first == std::numeric_limits<int>::max()) continue;
+        // Remove the buffer and one additional block here to get actual height that is outside of the buffer
+        const int lock_height{prune_lock.second.height_first - PRUNE_LOCK_BUFFER - 1};
+        last_prune = std::max(1, std::min(last_prune, lock_height));
+        if (last_prune == lock_height) {
+            limiting_lock = prune_lock.first;
+        }
+    }
+
+    if (limiting_lock) {
+        LogDebug(BCLog::PRUNE, "%s limited pruning to height %d\n", limiting_lock.value(), last_prune);
+    }
+    return last_prune;
+}
+
+void BlockManager::ApplyPrunedFiles(const std::set<int>& setFilesToPrune)
+{
+    AssertLockHeld(::cs_main);
+    if (setFilesToPrune.empty()) return;
+
+    if (!m_have_pruned) {
+        m_block_tree_db->WriteFlag("prunedblockfiles", true);
+        m_have_pruned = true;
+    }
+    WriteBlockIndexDB();
+    UnlinkPrunedFiles(setFilesToPrune);
+}
+
+void BlockManager::PruneBlockFile(int file_number)
+{
+    AssertLockHeld(::cs_main);
+    const std::set<int> files_to_prune{file_number};
+    PruneOneBlockFile(file_number);
+    ApplyPrunedFiles(files_to_prune);
+}
+
+bool BlockManager::PruneFiles(const PruneContext& prune_context, PruneFilesMode mode)
+{
+    AssertLockHeld(::cs_main);
+    std::set<int> files_to_prune;
+    switch (mode) {
+    case PruneFilesMode::Manual:
+        FindFilesToPruneManual(files_to_prune, prune_context);
+        break;
+    case PruneFilesMode::Target:
+        FindFilesToPrune(files_to_prune, prune_context);
+        m_check_for_pruning = false;
+        break;
+    } // no default case, so the compiler can warn about missing cases
+
+    if (files_to_prune.empty()) return false;
+
+    if (!FlushChainstateBlockFile(prune_context.chain_height)) {
+        LogWarning("%s: Failed to flush block file.\n", __func__);
+    }
+    ApplyPrunedFiles(files_to_prune);
+    return true;
 }
 
 CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)

@@ -106,13 +106,6 @@ const std::vector<std::string> CHECKLEVEL_DOC {
     "level 4 tries to reconnect the blocks",
     "each level includes the checks of the previous levels",
 };
-/** The number of blocks to keep below the deepest prune lock.
- *  There is nothing special about this number. It is higher than what we
- *  expect to see in regular mainnet reorgs, but not so high that it would
- *  noticeably interfere with the pruning mechanism.
- * */
-static constexpr int PRUNE_LOCK_BUFFER{10};
-
 TRACEPOINT_SEMAPHORE(validation, block_connected);
 TRACEPOINT_SEMAPHORE(utxocache, flush);
 TRACEPOINT_SEMAPHORE(mempool, replaced);
@@ -2703,7 +2696,6 @@ bool Chainstate::FlushStateToDisk(
 {
     LOCK(cs_main);
     assert(this->CanFlushToDisk());
-    std::set<int> setFilesToPrune;
     bool full_flush_completed = false;
 
     [[maybe_unused]] const size_t coins_count{CoinsTip().GetCacheSize()};
@@ -2716,40 +2708,28 @@ bool Chainstate::FlushStateToDisk(
         CoinsCacheSizeState cache_state = GetCoinsCacheSizeState();
         LOCK(m_blockman.cs_LastBlockFile);
         if (m_blockman.IsPruneMode() && (m_blockman.m_check_for_pruning || nManualPruneHeight > 0) && m_chainman.m_blockman.m_blockfiles_indexed) {
-            // make sure we don't prune above any of the prune locks bestblocks
-            // pruning is height-based
-            int last_prune{m_chain.Height()}; // last height we can prune
-            std::optional<std::string> limiting_lock; // prune lock that actually was the limiting factor, only used for logging
-
-            for (const auto& prune_lock : m_blockman.m_prune_locks) {
-                if (prune_lock.second.height_first == std::numeric_limits<int>::max()) continue;
-                // Remove the buffer and one additional block here to get actual height that is outside of the buffer
-                const int lock_height{prune_lock.second.height_first - PRUNE_LOCK_BUFFER - 1};
-                last_prune = std::max(1, std::min(last_prune, lock_height));
-                if (last_prune == lock_height) {
-                    limiting_lock = prune_lock.first;
-                }
+            if (!CheckDiskSpace(m_blockman.m_opts.blocks_dir)) {
+                return FatalError(m_chainman.GetNotifications(), state, _("Disk space is too low!"));
             }
 
-            if (limiting_lock) {
-                LogDebug(BCLog::PRUNE, "%s limited pruning to height %d\n", limiting_lock.value(), last_prune);
-            }
+            // make sure we don't prune above any of the prune locks bestblocks; pruning is height-based
+            const int last_prune{m_blockman.GetPruneLockLimit(m_chain.Height())};
 
             if (nManualPruneHeight > 0) {
                 LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune (manual)", BCLog::BENCH);
 
                 const auto [first_block_to_prune, last_block_to_prune]{GetPruneRange(std::min(last_prune, nManualPruneHeight))};
-                m_blockman.FindFilesToPruneManual(setFilesToPrune, node::PruneContext{
+                fFlushForPrune = m_blockman.PruneFiles(node::PruneContext{
                     .chain_height = m_chain.Height(),
                     .first_block_to_prune = first_block_to_prune,
                     .last_block_to_prune = last_block_to_prune,
                     .chain_role = GetRole(),
-                });
+                }, node::PruneFilesMode::Manual);
             } else {
                 LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune", BCLog::BENCH);
 
                 const auto [first_block_to_prune, last_block_to_prune]{GetPruneRange(last_prune)};
-                m_blockman.FindFilesToPrune(setFilesToPrune, node::PruneContext{
+                fFlushForPrune = m_blockman.PruneFiles(node::PruneContext{
                     .chain_height = m_chain.Height(),
                     .first_block_to_prune = first_block_to_prune,
                     .last_block_to_prune = last_block_to_prune,
@@ -2758,15 +2738,7 @@ bool Chainstate::FlushStateToDisk(
                     .target_sync_height = static_cast<uint64_t>(Assert(m_chainman.m_best_header)->nHeight),
                     .prune_after_height = m_chainman.GetParams().PruneAfterHeight(),
                     .chain_role = GetRole(),
-                });
-                m_blockman.m_check_for_pruning = false;
-            }
-            if (!setFilesToPrune.empty()) {
-                fFlushForPrune = true;
-                if (!m_blockman.m_have_pruned) {
-                    m_blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true);
-                    m_blockman.m_have_pruned = true;
-                }
+                }, node::PruneFilesMode::Target);
             }
         }
         const auto nNow{NodeClock::now()};
@@ -2805,13 +2777,6 @@ bool Chainstate::FlushStateToDisk(
 
                 m_blockman.WriteBlockIndexDB();
             }
-            // Finally remove any pruned files
-            if (fFlushForPrune) {
-                LOG_TIME_MILLIS_WITH_CATEGORY("unlink pruned files", BCLog::BENCH);
-
-                m_blockman.UnlinkPrunedFiles(setFilesToPrune);
-            }
-
             if (!CoinsTip().GetBestBlock().IsNull()) {
                 // Typical Coin structures on disk are around 48 bytes in size.
                 // Pushing a new one to the database can cause it to be written
@@ -4534,16 +4499,6 @@ BlockValidationState TestBlockValidity(
     if (!state.IsValid()) NONFATAL_UNREACHABLE();
 
     return state;
-}
-
-/* This function is called from the RPC code for pruneblockchain */
-void PruneBlockFilesManual(Chainstate& active_chainstate, int nManualPruneHeight)
-{
-    BlockValidationState state;
-    if (!active_chainstate.FlushStateToDisk(
-            state, FlushStateMode::NONE, nManualPruneHeight)) {
-        LogWarning("Failed to flush state after manual prune (%s)", state.ToString());
-    }
 }
 
 bool Chainstate::LoadChainTip()
