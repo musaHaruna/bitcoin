@@ -15,6 +15,7 @@
 #include <kernel/checks.h>
 #include <kernel/context.h>
 #include <kernel/notifications_interface.h>
+#include <kernel/types.h>
 #include <kernel/warning.h>
 #include <logging.h>
 #include <node/blockstorage.h>
@@ -46,7 +47,6 @@
 #include <list>
 #include <memory>
 #include <optional>
-#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>

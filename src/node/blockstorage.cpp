@@ -15,7 +15,6 @@
 #include <kernel/chainparams.h>
 #include <kernel/messagestartchars.h>
 #include <kernel/notifications_interface.h>
-#include <kernel/types.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
