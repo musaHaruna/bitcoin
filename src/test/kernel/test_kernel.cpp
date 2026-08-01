@@ -12,6 +12,8 @@
 #include <test/kernel/block_data.h>
 #include <test/util/common.h>
 
+#include <array>
+#include <cassert>
 #include <charconv>
 #include <cstdint>
 #include <cstdlib>
@@ -26,6 +28,11 @@
 #include <vector>
 
 using namespace btck;
+
+extern "C" {
+// Test-only hook intentionally kept out of the public bitcoinkernel.h header.
+BITCOINKERNEL_API int btck_chainstate_manager_options_set_fast_prune_for_testing(btck_ChainstateManagerOptions* chainstate_manager_options, int fast_prune);
+}
 
 std::string random_string(uint32_t length)
 {
@@ -75,6 +82,120 @@ std::string byte_span_to_hex_string_reversed(std::span<const std::byte> bytes)
     return oss.str();
 }
 
+void append_u32(std::vector<std::byte>& out, uint32_t value)
+{
+    for (int i{0}; i < 4; ++i) out.push_back(std::byte{static_cast<unsigned char>(value >> (8 * i))});
+}
+
+void append_u64(std::vector<std::byte>& out, uint64_t value)
+{
+    for (int i{0}; i < 8; ++i) out.push_back(std::byte{static_cast<unsigned char>(value >> (8 * i))});
+}
+
+void append_compact_size(std::vector<std::byte>& out, uint64_t size)
+{
+    assert(size < 253);
+    out.push_back(std::byte{static_cast<unsigned char>(size)});
+}
+
+void append_bytes(std::vector<std::byte>& out, std::span<const std::byte> bytes)
+{
+    out.insert(out.end(), bytes.begin(), bytes.end());
+}
+
+std::vector<std::byte> script_num(int32_t value)
+{
+    assert(value > 0);
+    std::vector<std::byte> result;
+    while (value) {
+        result.push_back(std::byte{static_cast<unsigned char>(value & 0xff)});
+        value >>= 8;
+    }
+    if ((static_cast<unsigned char>(result.back()) & 0x80) != 0) {
+        result.push_back(std::byte{0});
+    }
+    return result;
+}
+
+void append_coinbase_height(std::vector<std::byte>& script, int32_t height)
+{
+    const auto height_bytes{script_num(height)};
+    assert(height_bytes.size() <= 75);
+    script.push_back(std::byte{static_cast<unsigned char>(height_bytes.size())});
+    append_bytes(script, height_bytes);
+}
+
+int64_t regtest_subsidy(int32_t height)
+{
+    static constexpr int64_t COIN{100000000};
+    static constexpr int32_t REGTEST_HALVING_INTERVAL{150};
+    const int halvings{height / REGTEST_HALVING_INTERVAL};
+    return halvings >= 64 ? 0 : (50 * COIN) >> halvings;
+}
+
+std::vector<std::byte> create_coinbase_tx(int32_t height)
+{
+    std::vector<std::byte> tx;
+    append_u32(tx, 2); // version
+    append_compact_size(tx, 1); // inputs
+    tx.insert(tx.end(), 32, std::byte{0}); // null prevout hash
+    append_u32(tx, 0xffffffff); // null prevout index
+
+    std::vector<std::byte> script_sig;
+    append_coinbase_height(script_sig, height);
+    script_sig.push_back(std::byte{0}); // OP_0 dummy extranonce
+    append_compact_size(tx, script_sig.size());
+    append_bytes(tx, script_sig);
+    append_u32(tx, 0xffffffff); // sequence
+
+    append_compact_size(tx, 1); // outputs
+    append_u64(tx, static_cast<uint64_t>(regtest_subsidy(height)));
+    append_compact_size(tx, 1);
+    tx.push_back(std::byte{0x51}); // OP_TRUE
+    append_u32(tx, 0); // locktime
+    return tx;
+}
+
+bool hash_meets_regtest_pow(std::span<const std::byte> hash)
+{
+    assert(hash.size() == 32);
+    static constexpr std::array<unsigned char, 32> TARGET{
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x7f};
+    for (int i{31}; i >= 0; --i) {
+        const auto actual{static_cast<unsigned char>(hash[i])};
+        if (actual < TARGET[i]) return true;
+        if (actual > TARGET[i]) return false;
+    }
+    return true;
+}
+
+std::vector<std::byte> create_regtest_block(std::span<const std::byte> prev_hash, uint32_t prev_time, int32_t height)
+{
+    assert(prev_hash.size() == 32);
+    const auto coinbase_tx{create_coinbase_tx(height)};
+    const auto merkle_root{Transaction{coinbase_tx}.Txid().ToBytes()};
+
+    std::vector<std::byte> block;
+    for (uint32_t nonce{0};; ++nonce) {
+        block.clear();
+        append_u32(block, 0x20000000); // version
+        append_bytes(block, prev_hash);
+        append_bytes(block, merkle_root);
+        append_u32(block, prev_time + 1);
+        append_u32(block, 0x207fffff); // regtest pow limit
+        append_u32(block, nonce);
+        append_compact_size(block, 1);
+        append_bytes(block, coinbase_tx);
+
+        if (hash_meets_regtest_pow(Block{block}.GetHash().ToBytes())) {
+            return block;
+        }
+    }
+}
+
 constexpr auto VERIFY_ALL_PRE_SEGWIT{ScriptVerificationFlags::P2SH | ScriptVerificationFlags::DERSIG |
                                      ScriptVerificationFlags::NULLDUMMY | ScriptVerificationFlags::CHECKLOCKTIMEVERIFY |
                                      ScriptVerificationFlags::CHECKSEQUENCEVERIFY};
@@ -98,6 +219,20 @@ public:
     }
 };
 
+class PruningTestLog
+{
+public:
+    void LogMessage(std::string_view message)
+    {
+        if (message.find("Kernel chainstate manager") != std::string_view::npos ||
+            message.find("Prune (Manual)") != std::string_view::npos ||
+            message.find("Block files have previously been pruned") != std::string_view::npos ||
+            message.find("Failed to load chain state") != std::string_view::npos) {
+            std::cout << "kernel: " << message;
+        }
+    }
+};
+
 struct TestDirectory {
     fs::path m_directory;
     TestDirectory(std::string directory_name)
@@ -115,6 +250,10 @@ struct TestDirectory {
 class TestKernelNotifications : public KernelNotifications
 {
 public:
+    explicit TestKernelNotifications(bool log_warnings = true) : m_log_warnings{log_warnings} {}
+
+    bool m_log_warnings;
+
     void HeaderTipHandler(SynchronizationState state, int64_t height, int64_t timestamp, bool presync) override
     {
         BOOST_CHECK_GT(timestamp, 0);
@@ -122,12 +261,16 @@ public:
 
     void WarningSetHandler(Warning warning, std::string_view message) override
     {
-        std::cout << "Kernel warning is set: " << message << std::endl;
+        if (m_log_warnings) {
+            std::cout << "Kernel warning is set: " << message << std::endl;
+        }
     }
 
     void WarningUnsetHandler(Warning warning) override
     {
-        std::cout << "Kernel warning was unset." << std::endl;
+        if (m_log_warnings) {
+            std::cout << "Kernel warning was unset." << std::endl;
+        }
     }
 
     void FlushErrorHandler(std::string_view error) override
@@ -155,45 +298,45 @@ public:
 
         auto mode{state.GetValidationMode()};
         switch (mode) {
-        case ValidationMode::VALID: {
+        case btck::ValidationMode::VALID: {
             std::cout << "Valid block" << std::endl;
             return;
         }
-        case ValidationMode::INVALID: {
+        case btck::ValidationMode::INVALID: {
             std::cout << "Invalid block: ";
             auto result{state.GetBlockValidationResult()};
             switch (result) {
-            case BlockValidationResult::UNSET:
+            case btck::BlockValidationResult::UNSET:
                 std::cout << "initial value. Block has not yet been rejected" << std::endl;
                 break;
-            case BlockValidationResult::HEADER_LOW_WORK:
+            case btck::BlockValidationResult::HEADER_LOW_WORK:
                 std::cout << "the block header may be on a too-little-work chain" << std::endl;
                 break;
-            case BlockValidationResult::CONSENSUS:
+            case btck::BlockValidationResult::CONSENSUS:
                 std::cout << "invalid by consensus rules (excluding any below reasons)" << std::endl;
                 break;
-            case BlockValidationResult::CACHED_INVALID:
+            case btck::BlockValidationResult::CACHED_INVALID:
                 std::cout << "this block was cached as being invalid and we didn't store the reason why" << std::endl;
                 break;
-            case BlockValidationResult::INVALID_HEADER:
+            case btck::BlockValidationResult::INVALID_HEADER:
                 std::cout << "invalid proof of work or time too old" << std::endl;
                 break;
-            case BlockValidationResult::MUTATED:
+            case btck::BlockValidationResult::MUTATED:
                 std::cout << "the block's data didn't match the data committed to by the PoW" << std::endl;
                 break;
-            case BlockValidationResult::MISSING_PREV:
+            case btck::BlockValidationResult::MISSING_PREV:
                 std::cout << "We don't have the previous block the checked one is built on" << std::endl;
                 break;
-            case BlockValidationResult::INVALID_PREV:
+            case btck::BlockValidationResult::INVALID_PREV:
                 std::cout << "A block this one builds on is invalid" << std::endl;
                 break;
-            case BlockValidationResult::TIME_FUTURE:
+            case btck::BlockValidationResult::TIME_FUTURE:
                 std::cout << "block timestamp was > 2 hours in the future (or our clock is bad)" << std::endl;
                 break;
             }
             return;
         }
-        case ValidationMode::INTERNAL_ERROR: {
+        case btck::ValidationMode::INTERNAL_ERROR: {
             std::cout << "Internal error" << std::endl;
             return;
         }
@@ -219,7 +362,7 @@ public:
 void run_verify_test(
     const ScriptPubkey& spent_script_pubkey,
     const Transaction& spending_tx,
-    const PrecomputedTransactionData* precomputed_txdata,
+    const btck::PrecomputedTransactionData* precomputed_txdata,
     int64_t amount,
     unsigned int input_index,
     bool taproot)
@@ -510,11 +653,11 @@ BOOST_AUTO_TEST_CASE(btck_precomputed_txdata) {
     auto tx{Transaction{tx_data}};
     auto tx_data_2{hex_string_to_byte_vec("02000000000101904f4ee5c87d20090b642f116e458cd6693292ad9ece23e72f15fb6c05b956210500000000fdffffff02e2010000000000002251200839a723933b56560487ec4d67dda58f09bae518ffa7e148313c5696ac837d9f10060000000000002251205826bcdae7abfb1c468204170eab00d887b61ab143464a4a09e1450bdc59a3340140f26e7af574e647355830772946356c27e7bbc773c5293688890f58983499581be84de40be7311a14e6d6422605df086620e75adae84ff06b75ce5894de5e994a00000000")};
     auto tx2{Transaction{tx_data_2}};
-    auto precomputed_txdata{PrecomputedTransactionData{
+    auto precomputed_txdata{btck::PrecomputedTransactionData{
         /*tx_to=*/tx,
         /*spent_outputs=*/{},
     }};
-    auto precomputed_txdata_2{PrecomputedTransactionData{
+    auto precomputed_txdata_2{btck::PrecomputedTransactionData{
         /*tx_to=*/tx2,
         /*spent_outputs=*/{},
     }};
@@ -535,7 +678,7 @@ BOOST_AUTO_TEST_CASE(btck_script_verify_tests)
         /*taproot=*/false);
 
     // Legacy transaction aca326a724eda9a461c10a876534ecd5ae7b27f10f26c3862fb996f80ea2d45d with precomputed_txdata
-    auto legacy_precomputed_txdata{PrecomputedTransactionData{
+    auto legacy_precomputed_txdata{btck::PrecomputedTransactionData{
         /*tx_to=*/legacy_spending_tx,
         /*spent_outputs=*/{},
     }};
@@ -559,7 +702,7 @@ BOOST_AUTO_TEST_CASE(btck_script_verify_tests)
         /*taproot=*/false);
 
     // Segwit transaction 1a3e89644985fbbb41e0dcfe176739813542b5937003c46a07de1e3ee7a4a7f3 with precomputed_txdata
-    auto segwit_precomputed_txdata{PrecomputedTransactionData{
+    auto segwit_precomputed_txdata{btck::PrecomputedTransactionData{
         /*tx_to=*/segwit_spending_tx,
         /*spent_outputs=*/{},
     }};
@@ -576,7 +719,7 @@ BOOST_AUTO_TEST_CASE(btck_script_verify_tests)
     auto taproot_spending_tx{Transaction{hex_string_to_byte_vec("01000000000101d1f1c1f8cdf6759167b90f52c9ad358a369f95284e841d7a2536cef31c0549580100000000fdffffff020000000000000000316a2f49206c696b65205363686e6f7272207369677320616e6420492063616e6e6f74206c69652e204062697462756734329e06010000000000225120a37c3903c8d0db6512e2b40b0dffa05e5a3ab73603ce8c9c4b7771e5412328f90140a60c383f71bac0ec919b1d7dbc3eb72dd56e7aa99583615564f9f99b8ae4e837b758773a5b2e4c51348854c8389f008e05029db7f464a5ff2e01d5e6e626174affd30a00")}};
     std::vector<TransactionOutput> taproot_spent_outputs;
     taproot_spent_outputs.emplace_back(taproot_spent_script_pubkey, 88480);
-    auto taproot_precomputed_txdata{PrecomputedTransactionData{
+    auto taproot_precomputed_txdata{btck::PrecomputedTransactionData{
         /*tx_to=*/taproot_spending_tx,
         /*spent_outputs=*/taproot_spent_outputs,
     }};
@@ -595,7 +738,7 @@ BOOST_AUTO_TEST_CASE(btck_script_verify_tests)
     std::vector<TransactionOutput> taproot2_spent_outputs;
     taproot2_spent_outputs.emplace_back(taproot2_spent_script_pubkey0, 546);
     taproot2_spent_outputs.emplace_back(taproot2_spent_script_pubkey1, 135125);
-    auto taproot2_precomputed_txdata{PrecomputedTransactionData{
+    auto taproot2_precomputed_txdata{btck::PrecomputedTransactionData{
         /*tx_to=*/taproot2_spending_tx,
         /*spent_outputs=*/taproot2_spent_outputs,
     }};
@@ -656,8 +799,8 @@ BOOST_AUTO_TEST_CASE(btck_context_tests)
 
     { // test with context options
         ContextOptions options{};
-        ChainParams params{ChainType::MAINNET};
-        ChainParams regtest_params{ChainType::REGTEST};
+        ChainParams params{btck::ChainType::MAINNET};
+        ChainParams regtest_params{btck::ChainType::REGTEST};
         CheckHandle(params, regtest_params);
         options.SetChainParams(params);
         options.SetNotifications(std::make_shared<TestKernelNotifications>());
@@ -720,7 +863,7 @@ BOOST_AUTO_TEST_CASE(btck_block)
     BOOST_CHECK_THROW(Block{empty_data}, std::runtime_error);
 }
 
-Context create_context(std::shared_ptr<TestKernelNotifications> notifications, ChainType chain_type, std::shared_ptr<TestValidationInterface> validation_interface = nullptr)
+Context create_context(std::shared_ptr<TestKernelNotifications> notifications, btck::ChainType chain_type, std::shared_ptr<TestValidationInterface> validation_interface = nullptr)
 {
     ContextOptions options{};
     ChainParams params{chain_type};
@@ -766,10 +909,15 @@ BOOST_AUTO_TEST_CASE(btck_chainman_tests)
     }
 
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::MAINNET)};
+    auto context{create_context(notifications, btck::ChainType::MAINNET)};
 
     ChainstateManagerOptions chainman_opts{context, PathToString(test_directory.m_directory), PathToString(test_directory.m_directory / "blocks")};
     chainman_opts.SetWorkerThreads(4);
+    BOOST_CHECK(chainman_opts.SetPrune(0));
+    BOOST_CHECK(chainman_opts.SetPrune(1));
+    BOOST_CHECK(!chainman_opts.SetPrune(549));
+    BOOST_CHECK(chainman_opts.SetPrune(550));
+    BOOST_CHECK(chainman_opts.SetPrune(0));
     BOOST_CHECK(!chainman_opts.SetWipeDbs(/*wipe_block_tree=*/true, /*wipe_chainstate=*/false));
     BOOST_CHECK(chainman_opts.SetWipeDbs(/*wipe_block_tree=*/true, /*wipe_chainstate=*/true));
     BOOST_CHECK(chainman_opts.SetWipeDbs(/*wipe_block_tree=*/false, /*wipe_chainstate=*/true));
@@ -806,7 +954,7 @@ std::unique_ptr<ChainMan> create_chainman(TestDirectory& test_directory,
 void chainman_reindex_test(TestDirectory& test_directory)
 {
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::MAINNET)};
+    auto context{create_context(notifications, btck::ChainType::MAINNET)};
     auto chainman{create_chainman(
         test_directory, /*reindex=*/true, /*wipe_chainstate=*/false,
         /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
@@ -851,7 +999,7 @@ void chainman_reindex_test(TestDirectory& test_directory)
 void chainman_reindex_chainstate_test(TestDirectory& test_directory)
 {
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::MAINNET)};
+    auto context{create_context(notifications, btck::ChainType::MAINNET)};
     auto chainman{create_chainman(
         test_directory, /*reindex=*/false, /*wipe_chainstate=*/true,
         /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
@@ -865,7 +1013,7 @@ void chainman_mainnet_validation_test(TestDirectory& test_directory)
 {
     auto notifications{std::make_shared<TestKernelNotifications>()};
     auto validation_interface{std::make_shared<TestValidationInterface>()};
-    auto context{create_context(notifications, ChainType::MAINNET, validation_interface)};
+    auto context{create_context(notifications, btck::ChainType::MAINNET, validation_interface)};
     auto chainman{create_chainman(
         test_directory, /*reindex=*/false, /*wipe_chainstate=*/false,
         /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
@@ -936,47 +1084,47 @@ BOOST_AUTO_TEST_CASE(btck_check_block_context_free)
 
     // Context-free block checks still need consensus params for the optional
     // proof-of-work validation path.
-    ChainParams mainnet_params{ChainType::MAINNET};
+    ChainParams mainnet_params{btck::ChainType::MAINNET};
     auto consensus_params = mainnet_params.GetConsensusParams();
 
     Block block{raw_block};
-    BlockValidationState state;
+    btck::BlockValidationState state;
 
-    BOOST_CHECK(block.Check(consensus_params, BlockCheckFlags::BASE, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+    BOOST_CHECK(block.Check(consensus_params, btck::BlockCheckFlags::BASE, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::VALID);
 
-    BOOST_CHECK(block.Check(consensus_params, BlockCheckFlags::ALL, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+    BOOST_CHECK(block.Check(consensus_params, btck::BlockCheckFlags::ALL, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::VALID);
 
     auto bad_merkle_block_data = raw_block;
     bad_merkle_block_data[MERKLE_ROOT_OFFSET] ^= std::byte{0x01};
     Block bad_merkle_block{bad_merkle_block_data};
 
-    BOOST_CHECK(!bad_merkle_block.Check(consensus_params, BlockCheckFlags::MERKLE, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::INVALID);
-    BOOST_CHECK(state.GetBlockValidationResult() == BlockValidationResult::MUTATED);
+    BOOST_CHECK(!bad_merkle_block.Check(consensus_params, btck::BlockCheckFlags::MERKLE, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::INVALID);
+    BOOST_CHECK(state.GetBlockValidationResult() == btck::BlockValidationResult::MUTATED);
 
-    BOOST_CHECK(bad_merkle_block.Check(consensus_params, BlockCheckFlags::BASE, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+    BOOST_CHECK(bad_merkle_block.Check(consensus_params, btck::BlockCheckFlags::BASE, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::VALID);
 
     auto bad_pow_block_data = raw_block;
     bad_pow_block_data[NBITS_OFFSET + 3] = std::byte{0x1c};
     Block bad_pow_block{bad_pow_block_data};
 
-    BOOST_CHECK(!bad_pow_block.Check(consensus_params, BlockCheckFlags::POW, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::INVALID);
-    BOOST_CHECK(state.GetBlockValidationResult() == BlockValidationResult::INVALID_HEADER);
+    BOOST_CHECK(!bad_pow_block.Check(consensus_params, btck::BlockCheckFlags::POW, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::INVALID);
+    BOOST_CHECK(state.GetBlockValidationResult() == btck::BlockValidationResult::INVALID_HEADER);
 
-    BOOST_CHECK(bad_pow_block.Check(consensus_params, BlockCheckFlags::MERKLE, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+    BOOST_CHECK(bad_pow_block.Check(consensus_params, btck::BlockCheckFlags::MERKLE, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::VALID);
 
     auto bad_base_block_data = raw_block;
     bad_base_block_data[COINBASE_PREVOUT_N_OFFSET] = std::byte{0x00};
     Block bad_base_block{bad_base_block_data};
 
-    BOOST_CHECK(!bad_base_block.Check(consensus_params, BlockCheckFlags::BASE, state));
-    BOOST_CHECK(state.GetValidationMode() == ValidationMode::INVALID);
-    BOOST_CHECK(state.GetBlockValidationResult() == BlockValidationResult::CONSENSUS);
+    BOOST_CHECK(!bad_base_block.Check(consensus_params, btck::BlockCheckFlags::BASE, state));
+    BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::INVALID);
+    BOOST_CHECK(state.GetBlockValidationResult() == btck::BlockValidationResult::CONSENSUS);
 
     // Test with invalid truncated block data.
     auto truncated_block_data = hex_string_to_byte_vec("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299");
@@ -1011,7 +1159,7 @@ BOOST_AUTO_TEST_CASE(btck_block_tree_entry_tests)
 {
     auto test_directory{TestDirectory{"block_tree_entry_test_bitcoin_kernel"}};
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::REGTEST)};
+    auto context{create_context(notifications, btck::ChainType::REGTEST)};
     auto chainman{create_chainman(
         test_directory,
         /*reindex=*/false,
@@ -1059,7 +1207,7 @@ BOOST_AUTO_TEST_CASE(btck_chainman_in_memory_tests)
     auto in_memory_test_directory{TestDirectory{"in-memory_test_bitcoin_kernel"}};
 
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::REGTEST)};
+    auto context{create_context(notifications, btck::ChainType::REGTEST)};
     auto chainman{create_chainman(
         in_memory_test_directory, /*reindex=*/false, /*wipe_chainstate=*/false,
         /*block_tree_db_in_memory=*/true, /*chainstate_db_in_memory=*/true, context)};
@@ -1083,7 +1231,7 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
     auto test_directory{TestDirectory{"regtest_test_bitcoin_kernel"}};
 
     auto notifications{std::make_shared<TestKernelNotifications>()};
-    auto context{create_context(notifications, ChainType::REGTEST)};
+    auto context{create_context(notifications, btck::ChainType::REGTEST)};
 
     {
         auto chainman{create_chainman(
@@ -1092,10 +1240,10 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
         for (const auto& data : REGTEST_BLOCK_DATA) {
             Block block{hex_string_to_byte_vec(data)};
             BlockHeader header = block.GetHeader();
-            BlockValidationState state{};
-            BOOST_CHECK(state.GetBlockValidationResult() == BlockValidationResult::UNSET);
+            btck::BlockValidationState state{};
+            BOOST_CHECK(state.GetBlockValidationResult() == btck::BlockValidationResult::UNSET);
             BOOST_CHECK(chainman->ProcessBlockHeader(header, state));
-            BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+            BOOST_CHECK(state.GetValidationMode() == btck::ValidationMode::VALID);
             BlockTreeEntry entry{*chainman->GetBlockTreeEntry(header.Hash())};
             BOOST_CHECK(!chainman->GetChain().Contains(entry));
             BlockTreeEntry best_entry{chainman->GetBestEntry()};
@@ -1141,8 +1289,8 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
     auto read_block_2 = chainman->ReadBlock(tip_2).value();
     check_equal(read_block_2.ToBytes(), hex_string_to_byte_vec(REGTEST_BLOCK_DATA[REGTEST_BLOCK_DATA.size() - 2]));
 
-    Txid txid = read_block.Transactions()[0].Txid();
-    Txid txid_2 = read_block_2.Transactions()[0].Txid();
+    btck::Txid txid = read_block.Transactions()[0].Txid();
+    btck::Txid txid_2 = read_block_2.Transactions()[0].Txid();
     BOOST_CHECK(txid != txid_2);
     BOOST_CHECK(txid == txid);
     CheckHandle(txid, txid_2);
@@ -1179,7 +1327,7 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
             }
             BOOST_CHECK(inputs.size() == spent_outputs.size());
             ScriptVerifyStatus status = ScriptVerifyStatus::OK;
-            const PrecomputedTransactionData precomputed_txdata{transaction, spent_outputs};
+            const btck::PrecomputedTransactionData precomputed_txdata{transaction, spent_outputs};
             for (size_t i{0}; i < inputs.size(); ++i) {
                 BOOST_CHECK(spent_outputs[i].GetScriptPubkey().Verify(spent_outputs[i].Amount(), transaction, &precomputed_txdata, i, ScriptVerificationFlags::ALL, status));
             }
@@ -1203,8 +1351,8 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
     // Get the last coin from the transaction spent outputs
     CoinView coin{transaction_spent_outputs.GetCoin(transaction_spent_outputs.Count() - 1)};
     BOOST_CHECK(!coin.IsCoinbase());
-    Coin owned_coin{coin};
-    Coin owned_coin_prev{owned_transaction_spent_outputs_prev.GetCoin(owned_transaction_spent_outputs_prev.Count() - 1)};
+    btck::Coin owned_coin{coin};
+    btck::Coin owned_coin_prev{owned_transaction_spent_outputs_prev.GetCoin(owned_transaction_spent_outputs_prev.Count() - 1)};
     CheckHandle(owned_coin, owned_coin_prev);
 
     // Validate coin properties
@@ -1255,4 +1403,94 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
     BOOST_CHECK(!chainman->ReadBlock(tip_2).has_value());
     fs::remove(test_directory.m_directory / "blocks" / "rev00000.dat");
     BOOST_CHECK_THROW(chainman->ReadBlockSpentOutputs(tip), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(btck_chainman_pruning_tests)
+{
+    Logger logger{std::make_unique<PruningTestLog>()};
+    auto test_directory{TestDirectory{"pruning_test_bitcoin_kernel"}};
+    auto notifications{std::make_shared<TestKernelNotifications>(/*log_warnings=*/false)};
+    auto context{create_context(notifications, btck::ChainType::REGTEST)};
+    static constexpr int32_t PRUNING_TEST_HEIGHT{1300};
+
+    {
+        ChainstateManagerOptions chainman_opts{
+            context,
+            PathToString(test_directory.m_directory),
+            PathToString(test_directory.m_directory / "blocks")};
+        BOOST_CHECK(chainman_opts.SetPrune(1));
+        BOOST_CHECK_EQUAL(btck_chainstate_manager_options_set_fast_prune_for_testing(chainman_opts.get(), 1), 0);
+        ChainMan chainman{context, chainman_opts};
+
+        auto early_blockman{chainman.GetBlockManager()};
+        auto early_prune_context{chainman.MakePruneContext()};
+        BOOST_CHECK(!early_blockman.PruneToHeight(early_prune_context, 1));
+
+        for (const auto& raw_block : REGTEST_BLOCK_DATA) {
+            Block block{hex_string_to_byte_vec(raw_block)};
+            bool new_block{false};
+            BOOST_CHECK(chainman.ProcessBlock(block, &new_block));
+            BOOST_CHECK(new_block);
+        }
+        auto prev_hash{Block{hex_string_to_byte_vec(REGTEST_BLOCK_DATA.back())}.GetHash().ToBytes()};
+        uint32_t prev_time{Block{hex_string_to_byte_vec(REGTEST_BLOCK_DATA.back())}.GetHeader().Timestamp()};
+        for (int32_t height{static_cast<int32_t>(REGTEST_BLOCK_DATA.size()) + 1}; height <= PRUNING_TEST_HEIGHT; ++height) {
+            const auto raw_block{create_regtest_block(prev_hash, prev_time, height)};
+            Block block{raw_block};
+            bool new_block{false};
+            BOOST_CHECK(chainman.ProcessBlock(block, &new_block));
+            BOOST_CHECK(new_block);
+            prev_hash = block.GetHash().ToBytes();
+            prev_time = block.GetHeader().Timestamp();
+        }
+
+        auto chain{chainman.GetChain()};
+        BOOST_CHECK_EQUAL(chain.Height(), PRUNING_TEST_HEIGHT);
+        auto old_entry{chain.GetByHeight(1)};
+        auto entry_for_direct_prune{chain.GetByHeight(800)};
+        auto tip_entry{chain.Entries().back()};
+        BOOST_REQUIRE(chainman.ReadBlock(old_entry));
+        BOOST_REQUIRE(chainman.ReadBlock(entry_for_direct_prune));
+        BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
+
+        auto blockman{chainman.GetBlockManager()};
+        auto prune_context{chainman.MakePruneContext()};
+        BOOST_CHECK(blockman.PruneToHeight(prune_context, 700));
+        BOOST_CHECK(!chainman.ReadBlock(old_entry));
+        BOOST_REQUIRE(chainman.ReadBlock(entry_for_direct_prune));
+        BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
+        BOOST_CHECK(blockman.Prune(prune_context));
+    }
+
+    {
+        ChainstateManagerOptions chainman_opts{
+            context,
+            PathToString(test_directory.m_directory),
+            PathToString(test_directory.m_directory / "blocks")};
+        BOOST_CHECK_THROW(ChainMan(context, chainman_opts), std::runtime_error);
+    }
+
+    {
+        ChainstateManagerOptions chainman_opts{
+            context,
+            PathToString(test_directory.m_directory),
+            PathToString(test_directory.m_directory / "blocks")};
+        BOOST_CHECK(chainman_opts.SetPrune(550));
+        BOOST_CHECK_EQUAL(btck_chainstate_manager_options_set_fast_prune_for_testing(chainman_opts.get(), 1), 0);
+        ChainMan chainman{context, chainman_opts};
+        auto chain{chainman.GetChain()};
+        auto old_entry{chain.GetByHeight(1)};
+        auto entry_for_direct_prune{chain.GetByHeight(800)};
+        auto tip_entry{chain.Entries().back()};
+
+        BOOST_CHECK(!chainman.ReadBlock(old_entry));
+        BOOST_REQUIRE(chainman.ReadBlock(entry_for_direct_prune));
+        BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
+        auto blockman{chainman.GetBlockManager()};
+        auto prune_context{chainman.MakePruneContext()};
+        BOOST_CHECK(blockman.Prune(prune_context));
+        BOOST_CHECK(blockman.PruneBlockEntry(entry_for_direct_prune));
+        BOOST_CHECK(!chainman.ReadBlock(entry_for_direct_prune));
+        BOOST_REQUIRE(chainman.ReadBlock(tip_entry));
+    }
 }

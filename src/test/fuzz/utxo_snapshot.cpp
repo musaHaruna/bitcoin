@@ -212,6 +212,7 @@ void utxo_snapshot_fuzz(FuzzBufferType buffer)
     }
     if (dirty_chainman) {
         setup.m_node.chainman.reset();
+        setup.m_node.blockman.reset();
         setup.m_make_chainman();
         setup.LoadVerifyActivateChainstate();
     }

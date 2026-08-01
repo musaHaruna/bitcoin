@@ -1102,6 +1102,11 @@ public:
         btck_chainstate_manager_options_set_worker_threads_num(get(), worker_threads);
     }
 
+    bool SetPrune(uint64_t prune_mode)
+    {
+        return btck_chainstate_manager_options_set_prune(get(), prune_mode) == 0;
+    }
+
     bool SetWipeDbs(bool wipe_block_tree, bool wipe_chainstate)
     {
         return btck_chainstate_manager_options_set_wipe_dbs(get(), wipe_block_tree, wipe_chainstate) == 0;
@@ -1247,6 +1252,38 @@ public:
     MAKE_RANGE_METHOD(TxsSpentOutputs, BlockSpentOutputs, &BlockSpentOutputs::Count, &BlockSpentOutputs::GetTxSpentOutputs, *this)
 };
 
+class PruneContext : public UniqueHandle<btck_PruneContext, btck_prune_context_destroy>
+{
+public:
+    explicit PruneContext(btck_PruneContext* ptr) : UniqueHandle{ptr} {}
+};
+
+class BlockManagerView
+{
+private:
+    btck_BlockManager* m_ptr;
+
+public:
+    explicit BlockManagerView(btck_BlockManager* ptr) : m_ptr{check(ptr)} {}
+
+    btck_BlockManager* get() const { return m_ptr; }
+
+    bool Prune(const PruneContext& context)
+    {
+        return btck_block_manager_prune(get(), context.get()) == 0;
+    }
+
+    bool PruneToHeight(const PruneContext& context, int32_t height)
+    {
+        return btck_block_manager_prune_to_height(get(), context.get(), height) == 0;
+    }
+
+    bool PruneBlockEntry(const BlockTreeEntry& entry)
+    {
+        return btck_block_manager_prune_block_entry(get(), entry.get()) == 0;
+    }
+};
+
 class ChainMan : UniqueHandle<btck_ChainstateManager, btck_chainstate_manager_destroy>
 {
 public:
@@ -1280,6 +1317,16 @@ public:
     bool ProcessBlockHeader(const BlockHeader& header, BlockValidationState& state)
     {
         return btck_chainstate_manager_process_block_header(get(), header.get(), state.get()) == 0;
+    }
+
+    BlockManagerView GetBlockManager()
+    {
+        return BlockManagerView{btck_chainstate_manager_get_block_manager(get())};
+    }
+
+    PruneContext MakePruneContext()
+    {
+        return PruneContext{btck_chainstate_manager_make_prune_context(get())};
     }
 
     ChainView GetChain() const

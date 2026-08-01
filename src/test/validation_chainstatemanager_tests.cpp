@@ -445,7 +445,11 @@ struct SnapshotTestSetup : TestChain100Setup {
             // For robustness, ensure the old manager is destroyed before creating a
             // new one.
             m_node.chainman.reset();
-            m_node.chainman = std::make_unique<ChainstateManager>(*Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+            m_node.blockman.reset();
+            auto blockman{std::make_unique<BlockManager>(*Assert(m_node.shutdown_signal), blockman_opts)};
+            auto chainman_new{std::make_unique<ChainstateManager>(*Assert(m_node.shutdown_signal), chainman_opts, *blockman)};
+            m_node.blockman = std::move(blockman);
+            m_node.chainman = std::move(chainman_new);
         }
         return *Assert(m_node.chainman);
     }

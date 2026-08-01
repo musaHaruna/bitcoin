@@ -15,6 +15,7 @@
 #include <kernel/checks.h>
 #include <kernel/context.h>
 #include <kernel/notifications_interface.h>
+#include <kernel/types.h>
 #include <kernel/warning.h>
 #include <logging.h>
 #include <node/blockstorage.h>
@@ -37,12 +38,15 @@
 #include <validation.h>
 #include <validationinterface.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <list>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -70,6 +74,15 @@ bool is_valid_flag_combination(script_verify_flags flags)
     if (flags & SCRIPT_VERIFY_CLEANSTACK && ~flags & (SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS)) return false;
     if (flags & SCRIPT_VERIFY_WITNESS && ~flags & SCRIPT_VERIFY_P2SH) return false;
     return true;
+}
+
+std::optional<uint64_t> prune_mode_to_target(uint64_t prune_mode)
+{
+    if (prune_mode == 0) return 0;
+    if (prune_mode == 1) return node::BlockManager::PRUNE_TARGET_MANUAL;
+    if (prune_mode < MIN_DISK_SPACE_FOR_BLOCK_FILES / 1_MiB) return std::nullopt;
+    if (prune_mode > std::numeric_limits<uint64_t>::max() / 1_MiB) return std::nullopt;
+    return prune_mode * 1_MiB;
 }
 
 class WriterStream
@@ -471,12 +484,19 @@ struct ChainstateManagerOptions {
     }
 };
 
+struct KernelPruneContext {
+    node::BlockManager* blockman;
+    Chainstate* chainstate;
+    node::PruneContext prune_context;
+};
+
 struct ChainMan {
+    std::unique_ptr<node::BlockManager> m_blockman;
     std::unique_ptr<ChainstateManager> m_chainman;
     std::shared_ptr<const Context> m_context;
 
-    ChainMan(std::unique_ptr<ChainstateManager> chainman, std::shared_ptr<const Context> context)
-        : m_chainman(std::move(chainman)), m_context(std::move(context)) {}
+    ChainMan(std::unique_ptr<node::BlockManager> blockman, std::unique_ptr<ChainstateManager> chainman, std::shared_ptr<const Context> context)
+        : m_blockman(std::move(blockman)), m_chainman(std::move(chainman)), m_context(std::move(context)) {}
 };
 
 } // namespace
@@ -490,6 +510,8 @@ struct btck_Context : Handle<btck_Context, std::shared_ptr<const Context>> {};
 struct btck_ChainParameters : Handle<btck_ChainParameters, CChainParams> {};
 struct btck_ChainstateManagerOptions : Handle<btck_ChainstateManagerOptions, ChainstateManagerOptions> {};
 struct btck_ChainstateManager : Handle<btck_ChainstateManager, ChainMan> {};
+struct btck_BlockManager : Handle<btck_BlockManager, node::BlockManager> {};
+struct btck_PruneContext : Handle<btck_PruneContext, KernelPruneContext> {};
 struct btck_Chain : Handle<btck_Chain, CChain> {};
 struct btck_BlockSpentOutputs : Handle<btck_BlockSpentOutputs, std::shared_ptr<CBlockUndo>> {};
 struct btck_TransactionSpentOutputs : Handle<btck_TransactionSpentOutputs, CTxUndo> {};
@@ -985,9 +1007,43 @@ void btck_chainstate_manager_options_set_worker_threads_num(btck_ChainstateManag
     btck_ChainstateManagerOptions::get(opts).m_chainman_options.worker_threads_num = worker_threads;
 }
 
+int btck_chainstate_manager_options_set_prune(btck_ChainstateManagerOptions* chainman_opts, uint64_t prune_mode)
+{
+    const auto prune_target{prune_mode_to_target(prune_mode)};
+    if (!prune_target) {
+        LogError("Prune mode must be 0, 1, or at least %d MiB.", MIN_DISK_SPACE_FOR_BLOCK_FILES / 1_MiB);
+        return -1;
+    }
+    auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    LOCK(opts.m_mutex);
+    opts.m_blockman_options.prune_target = *prune_target;
+    opts.m_chainstate_load_options.prune = prune_mode != 0;
+    if (*prune_target == node::BlockManager::PRUNE_TARGET_MANUAL) {
+        LogInfo("Kernel chainstate manager prune mode set: mode=%d target=manual load_pruned=%d",
+                prune_mode, opts.m_chainstate_load_options.prune);
+    } else {
+        LogInfo("Kernel chainstate manager prune mode set: mode=%d target=%dMiB load_pruned=%d",
+                prune_mode, *prune_target / 1_MiB, opts.m_chainstate_load_options.prune);
+    }
+    return 0;
+}
+
 void btck_chainstate_manager_options_destroy(btck_ChainstateManagerOptions* options)
 {
     delete options;
+}
+
+// Test-only hook for exercising pruning behavior with small block files. This
+// is intentionally not declared in bitcoinkernel.h and should not be treated as
+// part of the public API.
+extern "C" BITCOINKERNEL_API int btck_chainstate_manager_options_set_fast_prune_for_testing(btck_ChainstateManagerOptions* chainman_opts, int fast_prune)
+{
+    auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    LOCK(opts.m_mutex);
+    opts.m_blockman_options.fast_prune = fast_prune == 1;
+    LogInfo("Kernel chainstate manager fast prune test mode set: fast_prune=%d",
+            opts.m_blockman_options.fast_prune);
+    return 0;
 }
 
 int btck_chainstate_manager_options_set_wipe_dbs(btck_ChainstateManagerOptions* chainman_opts, int wipe_block_tree_db, int wipe_chainstate_db)
@@ -1025,10 +1081,12 @@ btck_ChainstateManager* btck_chainstate_manager_create(
     const btck_ChainstateManagerOptions* chainman_opts)
 {
     auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    std::unique_ptr<node::BlockManager> blockman;
     std::unique_ptr<ChainstateManager> chainman;
     try {
         LOCK(opts.m_mutex);
-        chainman = std::make_unique<ChainstateManager>(*opts.m_context->m_interrupt, opts.m_chainman_options, opts.m_blockman_options);
+        blockman = std::make_unique<node::BlockManager>(*opts.m_context->m_interrupt, opts.m_blockman_options);
+        chainman = std::make_unique<ChainstateManager>(*opts.m_context->m_interrupt, opts.m_chainman_options, *blockman);
     } catch (const std::exception& e) {
         LogError("Failed to create chainstate manager: %s", e.what());
         return nullptr;
@@ -1057,7 +1115,12 @@ btck_ChainstateManager* btck_chainstate_manager_create(
         return nullptr;
     }
 
-    return btck_ChainstateManager::create(std::move(chainman), opts.m_context);
+    return btck_ChainstateManager::create(std::move(blockman), std::move(chainman), opts.m_context);
+}
+
+btck_BlockManager* btck_chainstate_manager_get_block_manager(btck_ChainstateManager* chainstate_manager)
+{
+    return btck_BlockManager::ref(&btck_ChainstateManager::get(chainstate_manager).m_chainman->m_blockman);
 }
 
 const btck_BlockTreeEntry* btck_chainstate_manager_get_block_tree_entry_by_hash(const btck_ChainstateManager* chainman, const btck_BlockHash* block_hash)
@@ -1336,6 +1399,157 @@ int btck_chainstate_manager_process_block(
         *_new_block = new_block ? 1 : 0;
     }
     return result ? 0 : -1;
+}
+
+btck_PruneContext* btck_chainstate_manager_make_prune_context(btck_ChainstateManager* chainstate_manager)
+{
+    try {
+        auto& chainman{*btck_ChainstateManager::get(chainstate_manager).m_chainman};
+        LOCK(chainman.GetMutex());
+        Chainstate& active_chainstate{chainman.ActiveChainstate()};
+        const int chain_height{active_chainstate.m_chain.Height()};
+        const int last_prune{chainman.m_blockman.GetPruneLockLimit(chain_height)};
+        const auto [first_block_to_prune, last_block_to_prune]{active_chainstate.GetPruneRange(last_prune)};
+        return btck_PruneContext::create(KernelPruneContext{
+            .blockman = &chainman.m_blockman,
+            .chainstate = &active_chainstate,
+            .prune_context = node::PruneContext{
+                .chain_height = chain_height,
+                .first_block_to_prune = first_block_to_prune,
+                .last_block_to_prune = last_block_to_prune,
+                .is_ibd = chainman.IsInitialBlockDownload(),
+                .has_historical_chainstate = chainman.HistoricalChainstate() != nullptr,
+                .target_sync_height = static_cast<uint64_t>(Assert(chainman.m_best_header)->nHeight),
+                .prune_after_height = chainman.GetParams().PruneAfterHeight(),
+                .chain_role = active_chainstate.GetRole(),
+            }});
+    } catch (const std::exception& e) {
+        LogError("Failed to make prune context: %s", e.what());
+        return nullptr;
+    }
+}
+
+void btck_prune_context_destroy(btck_PruneContext* prune_context)
+{
+    delete prune_context;
+}
+
+int btck_block_manager_prune(btck_BlockManager* block_manager, const btck_PruneContext* prune_context)
+{
+    try {
+        auto& blockman{btck_BlockManager::get(block_manager)};
+        const auto& context{btck_PruneContext::get(prune_context)};
+        if (&blockman != context.blockman) {
+            LogError("Cannot prune blocks with a context from a different block manager.");
+            return -1;
+        }
+        if (!blockman.IsPruneMode()) {
+            LogError("Cannot prune blocks because the block manager is not in prune mode.");
+            return -1;
+        }
+        if (blockman.GetPruneTarget() == node::BlockManager::PRUNE_TARGET_MANUAL) {
+            LogInfo("Kernel block manager target prune skipped: manual prune mode has no target.");
+            return 0;
+        }
+        LogInfo("Kernel block manager target prune requested: target=%dMiB",
+                blockman.GetPruneTarget() / 1_MiB);
+        LOCK(::cs_main);
+        const bool pruned{blockman.PruneFiles(context.prune_context, node::PruneFilesMode::Target)};
+        if (pruned) {
+            Assert(context.chainstate)->ForceFlushStateToDisk(/*wipe_cache=*/false);
+        }
+        LogInfo("Kernel block manager target prune completed.");
+        return 0;
+    } catch (const std::exception& e) {
+        LogError("Failed to prune block manager: %s", e.what());
+        return -1;
+    }
+}
+
+int btck_block_manager_prune_to_height(btck_BlockManager* block_manager, const btck_PruneContext* prune_context, int32_t height)
+{
+    try {
+        auto& blockman{btck_BlockManager::get(block_manager)};
+        const auto& context{btck_PruneContext::get(prune_context)};
+        if (&blockman != context.blockman) {
+            LogError("Cannot prune blocks with a context from a different block manager.");
+            return -1;
+        }
+        if (!blockman.IsPruneMode()) {
+            LogError("Cannot prune blocks because the block manager is not in prune mode.");
+            return -1;
+        }
+        if (height < 0) {
+            LogError("Cannot prune to a negative block height.");
+            return -1;
+        }
+
+        const int chain_height{context.prune_context.chain_height};
+        if (static_cast<uint64_t>(chain_height) < context.prune_context.prune_after_height) {
+            LogError("Blockchain is too short for pruning.");
+            return -1;
+        }
+        if (chain_height <= static_cast<int>(MIN_BLOCKS_TO_KEEP)) {
+            LogError("Blockchain is too close to the tip for pruning.");
+            return -1;
+        }
+        if (height > chain_height) {
+            LogError("Blockchain is shorter than the attempted prune height.");
+            return -1;
+        }
+        const int prune_height{std::min<int>(height, chain_height - MIN_BLOCKS_TO_KEEP)};
+        if (prune_height <= 0) {
+            LogError("Cannot prune to a non-positive block height.");
+            return -1;
+        }
+        LogInfo("Kernel block manager manual prune requested: requested_height=%d actual_height=%d chain_height=%d",
+                height, prune_height, chain_height);
+        auto manual_context{context.prune_context};
+        manual_context.last_block_to_prune = std::min(manual_context.last_block_to_prune, prune_height);
+        LOCK(::cs_main);
+        const bool pruned{blockman.PruneFiles(manual_context, node::PruneFilesMode::Manual)};
+        if (pruned) {
+            Assert(context.chainstate)->ForceFlushStateToDisk(/*wipe_cache=*/false);
+        }
+        LogInfo("Kernel block manager manual prune completed: actual_height=%d", prune_height);
+        return 0;
+    } catch (const std::exception& e) {
+        LogError("Failed to prune block manager to height: %s", e.what());
+        return -1;
+    }
+}
+
+int btck_block_manager_prune_block_entry(
+    btck_BlockManager* block_manager,
+    const btck_BlockTreeEntry* block_tree_entry)
+{
+    try {
+        auto& blockman{btck_BlockManager::get(block_manager)};
+        if (!blockman.IsPruneMode()) {
+            LogError("Cannot prune blocks because the block manager is not in prune mode.");
+            return -1;
+        }
+
+        LOCK(::cs_main);
+        const CBlockIndex& block_index{btck_BlockTreeEntry::get(block_tree_entry)};
+        if (!(block_index.nStatus & BLOCK_HAVE_DATA)) {
+            return 0;
+        }
+        const int file_number{block_index.nFile};
+        if (file_number < 0) {
+            LogError("Cannot prune block entry with invalid block file number.");
+            return -1;
+        }
+
+        LogInfo("Kernel block manager block entry prune requested: height=%d file=%d hash=%s",
+                block_index.nHeight, file_number, block_index.GetBlockHash().ToString());
+        blockman.PruneBlockFile(file_number);
+        LogInfo("Kernel block manager block entry prune completed: file=%d", file_number);
+        return 0;
+    } catch (const std::exception& e) {
+        LogError("Failed to prune block tree entry: %s", e.what());
+        return -1;
+    }
 }
 
 int btck_chainstate_manager_process_block_header(

@@ -971,7 +971,17 @@ static RPCMethod pruneblockchain()
         height = chainHeight - MIN_BLOCKS_TO_KEEP;
     }
 
-    PruneBlockFilesManual(active_chainstate, height);
+    const int last_prune{chainman.m_blockman.GetPruneLockLimit(active_chain.Height())};
+    const auto [first_block_to_prune, last_block_to_prune]{active_chainstate.GetPruneRange(std::min<int>(last_prune, height))};
+    const bool pruned{chainman.m_blockman.PruneFiles(node::PruneContext{
+        .chain_height = active_chain.Height(),
+        .first_block_to_prune = first_block_to_prune,
+        .last_block_to_prune = last_block_to_prune,
+        .chain_role = active_chainstate.GetRole(),
+    }, node::PruneFilesMode::Manual)};
+    if (pruned) {
+        active_chainstate.ForceFlushStateToDisk(/*wipe_cache=*/false);
+    }
     return GetPruneHeight(chainman.m_blockman, active_chain).value_or(-1);
 },
     };
