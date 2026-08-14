@@ -36,9 +36,9 @@ class ScantxoutsetTest(BitcoinTestFramework):
         assert_equal(sum(u["coinbase"] for u in self.nodes[0].scantxoutset("start", [self.wallet.get_descriptor()])["unspents"]), 49)
 
         self.log.info("Create UTXOs...")
-        pubk1, spk_P2SH_SEGWIT, addr_P2SH_SEGWIT = getnewdestination("p2sh-segwit")
-        pubk2, spk_LEGACY, addr_LEGACY = getnewdestination("legacy")
-        pubk3, spk_BECH32, addr_BECH32 = getnewdestination("bech32")
+        (_, pubk1), spk_P2SH_SEGWIT, addr_P2SH_SEGWIT = getnewdestination("p2sh-segwit")
+        (_, pubk2), spk_LEGACY, addr_LEGACY = getnewdestination("legacy")
+        (_, pubk3), spk_BECH32, addr_BECH32 = getnewdestination("bech32")
         self.sendtodestination(spk_P2SH_SEGWIT, 0.001)
         self.sendtodestination(spk_LEGACY, 0.002)
         self.sendtodestination(spk_BECH32, 0.004)
@@ -134,6 +134,7 @@ class ScantxoutsetTest(BitcoinTestFramework):
 
         # Check that second arg is needed for start
         assert_raises_rpc_error(-1, "scanobjects argument is required for the start action", self.nodes[0].scantxoutset, "start")
+        assert_raises_rpc_error(-1, "scanobjects argument is required for the start action", self.nodes[0].scantxoutset, "start", None)
 
         # Check that invalid command give error
         assert_raises_rpc_error(-8, "Invalid action 'invalid_command'", self.nodes[0].scantxoutset, "invalid_command")

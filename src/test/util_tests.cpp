@@ -4,6 +4,7 @@
 
 #include <clientversion.h>
 #include <common/signmessage.h>
+#include <compat/compat.h>
 #include <hash.h>
 #include <key.h>
 #include <script/parsing.h>
@@ -14,6 +15,7 @@
 #include <test/util/setup_common.h>
 #include <test/util/time.h>
 #include <uint256.h>
+#include <univalue.h>
 #include <util/bitdeque.h>
 #include <util/byte_units.h>
 #include <util/fs.h>
@@ -24,6 +26,7 @@
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <util/time.h>
+#include <util/tokenbucket.h>
 #include <util/vector.h>
 
 #include <array>
@@ -36,7 +39,7 @@
 #include <optional>
 #include <string>
 #include <thread>
-#include <univalue.h>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -586,7 +589,7 @@ BOOST_AUTO_TEST_CASE(strprintf_numbers)
 
 BOOST_AUTO_TEST_CASE(util_mocktime)
 {
-    NodeClockContext clock_ctx{111s};
+    FakeNodeClock clock{111s};
     // Check that mock time does not change after a sleep
     for (const auto& num_sleep : {0ms, 1ms}) {
         UninterruptibleSleep(num_sleep);
@@ -882,8 +885,7 @@ BOOST_AUTO_TEST_CASE(test_ToIntegralHex)
     BOOST_CHECK_EQUAL(*n, 0);
     n = ToIntegral<uint64_t>("FfFfFfFfFfFfFfFf", 16);
     BOOST_CHECK_EQUAL(*n, 0xFfFfFfFfFfFfFfFfULL);
-    n = ToIntegral<int64_t>("-1", 16);
-    BOOST_CHECK_EQUAL(*n, -1);
+    BOOST_CHECK_EQUAL(*ToIntegral<int64_t>("-1", 16), -1);
     // Invalid values
     BOOST_CHECK(!ToIntegral<uint64_t>("", 16));
     BOOST_CHECK(!ToIntegral<uint64_t>("-1", 16));
@@ -1827,6 +1829,9 @@ BOOST_AUTO_TEST_CASE(saturating_left_shift_test)
     TestSaturatingLeftShift<int64_t>();
 }
 
+template <class Int, auto bytes>
+concept BraceInitializesTo = requires { Int{bytes}; };
+
 BOOST_AUTO_TEST_CASE(mib_string_literal_test)
 {
     // Basic equivalences and simple arithmetic operations
@@ -1850,16 +1855,12 @@ BOOST_AUTO_TEST_CASE(mib_string_literal_test)
     BOOST_CHECK_EQUAL(128_MiB, 0x8000000U);
     BOOST_CHECK_EQUAL(550_MiB, 550ULL * 1024 * 1024);
 
-    // Overflow handling
-    constexpr auto max_mib{std::numeric_limits<size_t>::max() >> 20};
-    if constexpr (SIZE_MAX == UINT32_MAX) {
-        BOOST_CHECK_EQUAL(max_mib, 4095U);
-        BOOST_CHECK_EQUAL(4095_MiB, size_t{4095} << 20);
-        BOOST_CHECK_EXCEPTION(4096_MiB, std::overflow_error, HasReason("MiB value too large for size_t byte conversion"));
-    } else {
-        BOOST_CHECK_EQUAL(4096_MiB, size_t{4096} << 20);
-    }
-    BOOST_CHECK_EXCEPTION(operator""_MiB(max_mib + 1), std::overflow_error, HasReason("MiB value too large for size_t byte conversion"));
+    // 4095 MiB fits in uint32_t bytes. 4096 MiB requires the uint64_t return type.
+    static_assert(BraceInitializesTo<uint32_t, 4095_MiB>);
+    static_assert(!BraceInitializesTo<uint32_t, 4096_MiB>);
+    static_assert(BraceInitializesTo<uint64_t, 4096_MiB>);
+    BOOST_CHECK_EQUAL(4095_MiB, uint32_t{4095} << 20);
+    BOOST_CHECK_EQUAL(4096_MiB, uint64_t{4096} << 20);
 }
 
 BOOST_AUTO_TEST_CASE(ceil_div_test)
@@ -1916,20 +1917,149 @@ BOOST_AUTO_TEST_CASE(gib_string_literal_test)
     BOOST_CHECK_EQUAL(3_GiB / 1_GiB, 3U);
     BOOST_CHECK_EQUAL(3_GiB, 3U << 30);
 
-    // Overflow handling and specific codebase values
-    constexpr auto max_gib{std::numeric_limits<size_t>::max() >> 30};
-    if constexpr (SIZE_MAX == UINT32_MAX) {
-        BOOST_CHECK_EQUAL(max_gib, 3U);
-        BOOST_CHECK_EXCEPTION(4_GiB, std::overflow_error, HasReason("GiB value too large for size_t byte conversion"));
-    } else {
-        BOOST_CHECK_GT(max_gib, 3U);
-        BOOST_CHECK_EQUAL(4_GiB, size_t{4} << 30);
-        BOOST_CHECK_EQUAL(4_GiB, 4096_MiB);
-        BOOST_CHECK_EQUAL(8_GiB, 8192_MiB);
-        BOOST_CHECK_EQUAL(16_GiB, 16384_MiB);
-        BOOST_CHECK_EQUAL(32_GiB, 32768_MiB);
-    }
-    BOOST_CHECK_EXCEPTION(operator""_GiB(max_gib + 1), std::overflow_error, HasReason("GiB value too large for size_t byte conversion"));
+    // 3 GiB fits in uint32_t bytes. 4 GiB requires the uint64_t return type.
+    static_assert(BraceInitializesTo<uint32_t, 3_GiB>);
+    static_assert(!BraceInitializesTo<uint32_t, 4_GiB>);
+    static_assert(BraceInitializesTo<uint64_t, 4_GiB>);
+    BOOST_CHECK_EQUAL(3_GiB, uint32_t{3} << 30);
+    BOOST_CHECK_EQUAL(4_GiB, uint64_t{4} << 30);
+
+    // Specific codebase values
+    BOOST_CHECK_EQUAL(4_GiB, 4096_MiB);
+    BOOST_CHECK_EQUAL(8_GiB, 8192_MiB);
+    BOOST_CHECK_EQUAL(16_GiB, 16384_MiB);
+    BOOST_CHECK_EQUAL(32_GiB, 32768_MiB);
+}
+
+BOOST_AUTO_TEST_CASE(token_bucket_initial_value)
+{
+    // Initial value is clamped to cap
+    util::TokenBucket<NodeClock> b1(/*rate=*/1, /*value=*/100, /*cap=*/10);
+    BOOST_CHECK_EQUAL(b1.value(), 10);
+
+    // Initial value below cap is kept as-is
+    util::TokenBucket<NodeClock> b2(/*rate=*/1, /*value=*/5, /*cap=*/10);
+    BOOST_CHECK_EQUAL(b2.value(), 5);
+}
+
+BOOST_AUTO_TEST_CASE(token_bucket_first_increment)
+{
+    // First increment establishes the time baseline but does not refill
+    util::TokenBucket<NodeClock> b(/*rate=*/100, /*value=*/0, /*cap=*/1000);
+    b.increment(NodeClock::time_point{10s});
+    BOOST_CHECK_EQUAL(b.value(), 0);
+
+    // Second increment refills based on elapsed time
+    b.increment(NodeClock::time_point{15s});
+    BOOST_CHECK_EQUAL(b.value(), 500); // 100/s * 5s
+}
+
+BOOST_AUTO_TEST_CASE(token_bucket_refill_caps)
+{
+    util::TokenBucket<NodeClock> b(/*rate=*/10, /*value=*/90, /*cap=*/100);
+    b.increment(NodeClock::time_point{1s});
+    b.increment(NodeClock::time_point{100s}); // would add 990, but cap is 100
+    BOOST_CHECK_EQUAL(b.value(), 100);
+}
+
+BOOST_AUTO_TEST_CASE(token_bucket_time_backwards)
+{
+    util::TokenBucket<NodeClock> b(/*rate=*/10, /*value=*/50, /*cap=*/200);
+    b.increment(NodeClock::time_point{10s});
+    b.increment(NodeClock::time_point{5s}); // backwards, no change
+    BOOST_CHECK_EQUAL(b.value(), 50);
+    b.increment(NodeClock::time_point{15s}); // forwards takes backwards into account
+    BOOST_CHECK_EQUAL(b.value(), 150);
+}
+
+BOOST_AUTO_TEST_CASE(token_bucket_decrement_no_debt)
+{
+    // Default debt=0: returns false at exactly 0
+    util::TokenBucket<NodeClock> b(/*rate=*/1, /*value=*/3, /*cap=*/10);
+    BOOST_CHECK(b.decrement(1));  // 3 -> 2
+    BOOST_CHECK(b.decrement(1));  // 2 -> 1
+    BOOST_CHECK(!b.decrement(1)); // 1 -> 0, at floor
+    BOOST_CHECK_EQUAL(b.value(), 0);
+    BOOST_CHECK(!b.decrement(1)); // 0 -> -1, despite being at floor
+    BOOST_CHECK_EQUAL(b.value(), -1);
+}
+
+BOOST_AUTO_TEST_CASE(token_bucket_decrement_with_debt)
+{
+    util::TokenBucket<NodeClock> b(/*rate=*/1, /*value=*/2, /*cap=*/10);
+    BOOST_CHECK(b.decrement(1, -3));  // 2 -> 1
+    BOOST_CHECK(b.decrement(1, -3));  // 1 -> 0
+    BOOST_CHECK(b.decrement(1, -3));  // 0 -> -1, still above -3
+    BOOST_CHECK(b.decrement(1, -3));  // -1 -> -2, still above -3
+    BOOST_CHECK(!b.decrement(1, -3)); // -2 -> -3, at floor
+    BOOST_CHECK_EQUAL(b.value(), -3);
+}
+
+BOOST_AUTO_TEST_CASE(token_bucket_drain_and_refill)
+{
+    util::TokenBucket<NodeClock> b(/*rate=*/10, /*value=*/20, /*cap=*/100);
+    b.decrement(20); // drain to 0
+    BOOST_CHECK_EQUAL(b.value(), 0);
+
+    b.increment(NodeClock::time_point{1s});
+    b.increment(NodeClock::time_point{4s}); // +30
+    BOOST_CHECK_EQUAL(b.value(), 30);
+}
+
+
+BOOST_AUTO_TEST_CASE(token_bucket_first_increment_at_epoch)
+{
+    // The first increment establishes the baseline (no refill) even when it
+    // lands exactly on the clock epoch; later increments then refill normally.
+    util::TokenBucket<NodeClock> b(/*rate=*/100, /*value=*/0, /*cap=*/1000);
+    b.increment(NodeClock::time_point{0s});
+    BOOST_CHECK_EQUAL(b.value(), 0);
+    b.increment(NodeClock::time_point{5s});
+    BOOST_CHECK_EQUAL(b.value(), 500); // 100/s * 5s
+}
+
+BOOST_AUTO_TEST_CASE(token_bucket_at_cap_advances_baseline)
+{
+    util::TokenBucket<NodeClock> b(/*rate=*/10, /*value=*/100, /*cap=*/100);
+    BOOST_CHECK_EQUAL(b.value(), 100); // already at cap
+    b.increment(NodeClock::time_point{1s});   // baseline established at 1s
+    b.increment(NodeClock::time_point{100s}); // 99s spent at the cap; baseline -> 100s
+    BOOST_CHECK_EQUAL(b.value(), 100);
+
+    b.decrement(100); // drain to 0
+    BOOST_CHECK_EQUAL(b.value(), 0);
+
+    // refill doesn't "bank" the extra 99s we were at cap
+    b.increment(NodeClock::time_point{101s});
+    BOOST_CHECK_EQUAL(b.value(), 10);
+
+    // And when real time genuinely elapses, a single increment refills straight
+    // back to the cap immediately.
+    b.increment(NodeClock::time_point{200s}); // 99s elapsed -> +990, clamped to cap
+    BOOST_CHECK_EQUAL(b.value(), 100);
+}
+
+BOOST_AUTO_TEST_CASE(token_bucket_fractional_refill)
+{
+    // Sub-second elapsed time accumulates fractional tokens via double math.
+    util::TokenBucket<NodeClock> b(/*rate=*/10, /*value=*/0, /*cap=*/100);
+    b.increment(NodeClock::time_point{1s});
+    b.increment(NodeClock::time_point{1250ms}); // 10/s * 0.25s = 2.5
+    BOOST_CHECK_EQUAL(b.value(), 2.5);
+}
+
+BOOST_AUTO_TEST_CASE(token_bucket_refill_from_debt)
+{
+    // Refilling from a negative (debt) balance accrues normally and still
+    // clamps to the cap rather than to debt + increment.
+    util::TokenBucket<NodeClock> b(/*rate=*/10, /*value=*/0, /*cap=*/100);
+    BOOST_CHECK(!b.decrement(50)); // -> -50, below floor 0
+    BOOST_CHECK_EQUAL(b.value(), -50);
+    b.increment(NodeClock::time_point{1s});   // baseline
+    b.increment(NodeClock::time_point{4s});   // +30 -> -20
+    BOOST_CHECK_EQUAL(b.value(), -20);
+    b.increment(NodeClock::time_point{100s}); // +960 but clamped to cap
+    BOOST_CHECK_EQUAL(b.value(), 100);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

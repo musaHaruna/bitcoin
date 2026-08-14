@@ -109,7 +109,7 @@ private:
     /** Response handlers */
     std::deque<ReplyHandlerCB> m_reply_handlers;
     /** Buffer for incoming data */
-    std::vector<std::byte> m_recv_buffer;
+    std::string m_recv_buffer;
     /** Process complete lines from the receive buffer */
     bool ProcessBuffer();
 };
@@ -151,7 +151,8 @@ private:
     std::vector<uint8_t> m_cookie;
     /** ClientNonce for SAFECOOKIE auth */
     std::vector<uint8_t> m_client_nonce;
-    /** Main control thread */
+
+    /// \anchor torcontrol
     void ThreadControl();
 
 public:

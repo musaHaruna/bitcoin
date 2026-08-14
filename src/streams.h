@@ -188,7 +188,6 @@ public:
         return std::string{UCharCast(data()), UCharCast(data() + size())};
     }
 
-
     //
     // Vector subset
     //
@@ -209,8 +208,6 @@ public:
     //
     // Stream subset
     //
-    int in_avail() const         { return size(); }
-
     void read(std::span<value_type> dst)
     {
         if (dst.size() == 0) return;
@@ -266,6 +263,20 @@ public:
 
     /** Compute total memory usage of this object (own memory + any dynamic memory). */
     size_t GetMemoryUsage() const noexcept;
+};
+
+// Require empty scratch streams on entry and reset them on exit.
+class ScopedDataStreamUsage
+{
+    DataStream& m_stream;
+
+public:
+    explicit ScopedDataStreamUsage(DataStream& stream) : m_stream{stream} { assert(m_stream.empty()); }
+
+    ScopedDataStreamUsage(const ScopedDataStreamUsage&) = delete;
+    ScopedDataStreamUsage& operator=(const ScopedDataStreamUsage&) = delete;
+
+    ~ScopedDataStreamUsage() { m_stream.clear(); }
 };
 
 template <typename IStream>

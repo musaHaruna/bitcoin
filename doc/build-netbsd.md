@@ -1,8 +1,8 @@
 # NetBSD Build Guide
 
-**Updated for NetBSD [10.1](https://netbsd.org/releases/formal-10/NetBSD-10.1.html)**
+Bitcoin Core is supported on all [supported NetBSD releases](https://www.netbsd.org/releases/).
 
-This guide describes how to build bitcoind, command-line utilities, and GUI on NetBSD.
+This guide describes how to build bitcoind, command-line utilities, and GUI on the latest release.
 
 ## Preparation
 
@@ -12,10 +12,10 @@ Install the required dependencies the usual way you [install software on NetBSD]
 The example commands below use `pkgin`.
 
 ```bash
-pkgin install git cmake pkg-config boost libevent
+pkgin install git cmake boost
 ```
 
-NetBSD currently ships with an older version of `gcc` than is needed to build. You should upgrade your `gcc` and then pass this new version to the configure script.
+NetBSD currently ships with an older version of `gcc` than is needed to build. You should upgrade your `gcc` and then pass this new version to the CMake configuration.
 
 For example, grab `gcc12`:
 ```
@@ -82,9 +82,9 @@ Otherwise, if you don't need QR encoding support, use the `-DWITH_QRENCODE=OFF` 
 #### Notifications
 ###### ZeroMQ
 
-Bitcoin Core can provide notifications via ZeroMQ. If the package is installed, support will be compiled in.
+Bitcoin Core can provide notifications via ZeroMQ. To compile ZMQ support, install the following dependency and pass `-DWITH_ZMQ=ON` when configuring.
 ```bash
-pkgin install zeromq
+pkgin install zeromq pkg-config
 ```
 
 #### Test Suite Dependencies
@@ -93,7 +93,14 @@ There is an included test suite that is useful for testing code changes when dev
 To run the test suite (recommended), you will need to have Python 3 installed:
 
 ```bash
-pkgin install python313 py313-zmq
+pkgin install python313 py313-zmq lsof
+```
+
+When the `lsof` binary package was built for a different point release, it might be necessary to force its installation as follows:
+
+```bash
+echo "CHECK_OSABI=no" >> /etc/pkg_install.conf
+pkgin install lsof
 ```
 
 ## Building Bitcoin Core

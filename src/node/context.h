@@ -5,6 +5,8 @@
 #ifndef BITCOIN_NODE_CONTEXT_H
 #define BITCOIN_NODE_CONTEXT_H
 
+#include <node/mining_types.h>
+
 #include <atomic>
 #include <cstdlib>
 #include <functional>
@@ -16,8 +18,8 @@ class ArgsManager;
 class AddrMan;
 class BanMan;
 class BaseIndex;
-class CBlockPolicyEstimator;
 class CConnman;
+class FeeRateEstimatorManager;
 class ValidationSignals;
 class CScheduler;
 class CTxMemPool;
@@ -68,7 +70,7 @@ struct NodeContext {
     std::unique_ptr<CConnman> connman;
     std::unique_ptr<CTxMemPool> mempool;
     std::unique_ptr<const NetGroupManager> netgroupman;
-    std::unique_ptr<CBlockPolicyEstimator> fee_estimator;
+    std::unique_ptr<FeeRateEstimatorManager> fee_estimator_man;
     std::unique_ptr<PeerManager> peerman;
     std::unique_ptr<TorController> tor_controller;
     std::unique_ptr<ChainstateManager> chainman;
@@ -81,6 +83,11 @@ struct NodeContext {
     //! Reference to chain client that should used to load or create wallets
     //! opened by the gui.
     std::unique_ptr<interfaces::Mining> mining;
+    //! Mining options used to create block templates. This value member is an
+    //! exception to the dependency guidance above because BlockCreateOptions is
+    //! a minimal dependency. It could be moved to the BlockTemplateCache
+    //! proposed in bitcoin/bitcoin#33421.
+    BlockCreateOptions mining_args;
     interfaces::WalletLoader* wallet_loader{nullptr};
     std::unique_ptr<CScheduler> scheduler;
     std::function<void()> rpc_interruption_point = [] {};

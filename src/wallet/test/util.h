@@ -39,9 +39,6 @@ std::shared_ptr<CWallet> TestLoadWallet(WalletContext& context);
 std::shared_ptr<CWallet> TestLoadWallet(std::unique_ptr<WalletDatabase> database, WalletContext& context);
 void TestUnloadWallet(std::shared_ptr<CWallet>&& wallet);
 
-// Creates a copy of the provided database
-std::unique_ptr<WalletDatabase> DuplicateMockDatabase(WalletDatabase& database);
-
 /** Returns a new encoded destination from the wallet (hardcoded to BECH32) */
 std::string getnewaddress(CWallet& w);
 /** Returns a new destination, of an specific type, from the wallet */
@@ -59,7 +56,7 @@ public:
 
 /** A WalletDatabase whose contents and return values can be modified as needed for testing
  **/
-class MockableSQLiteDatabase : public SQLiteDatabase
+class MockableSQLiteDatabase : public InMemoryWalletDatabase
 {
 public:
     MockableSQLiteDatabase();
@@ -67,7 +64,6 @@ public:
     bool Backup(const std::string& strDest) const override { return true; }
 
     std::string Filename() override { return "mockable"; }
-    std::vector<fs::path> Files() override { return {}; }
     std::string Format() override { return "sqlite-mock"; }
     std::unique_ptr<DatabaseBatch> MakeBatch() override { return std::make_unique<MockableSQLiteBatch>(*this); }
 };
