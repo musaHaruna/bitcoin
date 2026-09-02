@@ -24,6 +24,15 @@ class MemPoolFeeRateEstimator;
 // How often to flush data to disk
 inline constexpr std::chrono::hours FEE_FLUSH_INTERVAL{1};
 
+/** Both component estimates and the manager-selected combined result from one query. */
+struct FeeRateEstimatorResults {
+    util::Expected<FeeRateEstimation, FeeRateEstimationError> block_policy;
+    util::Expected<FeeRateEstimation, FeeRateEstimationError> mempool_policy;
+    util::Expected<FeeRateEstimation, FeeRateEstimationError> combined;
+    std::optional<MemPoolFeeRateEstimatorCache::Diagnostics> mempool_cache;
+    bool mempool_cache_hit{false};
+};
+
 /** \class FeeRateEstimatorManager
  * Manages fee rate estimators.
  */
@@ -62,6 +71,9 @@ public:
      */
     virtual util::Expected<FeeRateEstimation, FeeRateEstimationError> GetFeeRateEstimate(FeeRateEstimatorType type, int target, bool conservative) const;
 
+    /** Return both component estimates and their combined selection without re-querying either estimator. */
+    FeeRateEstimatorResults GetFeeRateEstimatorResults(int target, bool conservative) const;
+
     /** Flush recorded data to disk. */
     void IntervalFlush();
 
@@ -87,6 +99,9 @@ public:
      * Returns per-block weight statistics for the last MEMPOOL_HEALTH_WINDOW_BLOCKS mined blocks.
      */
     std::vector<MinedBlockStats> MempoolPolicyEstimatorBlocksStats() const;
+
+    /** Returns aggregate health details for the mempool policy estimator. */
+    MemPoolFeeRateEstimator::HealthDiagnostics MempoolPolicyEstimatorHealthDiagnostics() const;
 
 protected:
     /** Overridden from CValidationInterface. */

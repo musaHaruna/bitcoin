@@ -63,11 +63,24 @@ public:
     struct FeeRateEstimate {
         FeePerVSize m_conservative;
         FeePerVSize m_economical;
+        bool m_conservative_used_floor{false};
+        bool m_economical_used_floor{false};
+    };
+    struct Diagnostics {
+        FeeRateEstimate estimate;
+        uint256 tip_hash;
+        std::chrono::milliseconds age{0};
     };
     /** Returns cached estimates if not stale and computed on tip_hash, nullopt otherwise. */
     std::optional<FeeRateEstimate> GetCachedEstimate(const uint256& tip_hash) const;
+    /** Returns fresh cached estimates together with their tip and age. */
+    std::optional<Diagnostics> GetDiagnostics(const uint256& tip_hash) const;
     /** Update the cache with new estimates computed on tip_hash. */
-    void Update(FeePerVSize conservative, FeePerVSize economical, const uint256& tip_hash);
+    void Update(FeePerVSize conservative,
+                FeePerVSize economical,
+                const uint256& tip_hash,
+                bool conservative_used_floor = false,
+                bool economical_used_floor = false);
     /** Clear cached fee rate estimates. */
     void Clear();
 
@@ -93,6 +106,36 @@ public:
         FeePerVSize p75;
     };
 
+    //! Health of the recent mined-block window for fee rate estimation.
+    enum class MempoolHealth {
+        //! Recent blocks represent the mempool well enough to estimate a fee rate.
+        HEALTHY,
+        //! Too few recent mined blocks to estimate a fee rate.
+        INSUFFICIENT_DATA,
+        //! Recent blocks include too few mempool transactions to estimate a fee rate.
+        LOW_COVERAGE,
+    };
+
+    /** Read-only health details used by RPC diagnostics. */
+    struct HealthDiagnostics {
+        MempoolHealth health{MempoolHealth::INSUFFICIENT_DATA};
+        size_t tracked_blocks{0};
+        std::vector<MinedBlockStats> blocks;
+        uint256 window_tip_hash;
+        uint64_t total_block_weight{0};
+        uint64_t total_removed_weight{0};
+        uint64_t minimum_representative_window_weight{0};
+        std::optional<double> coverage_ratio;
+        bool low_activity_bypass{false};
+    };
+
+    /** One mempool estimate together with the exact cache entry used or generated. */
+    struct EstimateResult {
+        util::Expected<FeeRateEstimation, FeeRateEstimationError> estimate;
+        std::optional<MemPoolFeeRateEstimatorCache::Diagnostics> cache;
+        bool cache_hit{false};
+    };
+
     MemPoolFeeRateEstimator(fs::path mempool_estimator_file_path,
                             const CTxMemPool& mempool,
                             ChainstateManager& chainman);
@@ -107,6 +150,7 @@ public:
     static Percentiles CalculateMaxWeightPercentiles(std::span<const FeePerVSize> chunk_feerates);
     util::Expected<FeeRateEstimation, FeeRateEstimationError> EstimateFeeRate(bool conservative) const
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    EstimateResult EstimateFeeRateWithDiagnostics(bool conservative) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
     unsigned int MaximumTarget() const
     {
         return MEMPOOL_FEE_ESTIMATOR_MAX_TARGET;
@@ -122,15 +166,8 @@ public:
                                    const std::vector<RemovedMempoolTransactionInfo>& txs_removed_for_block,
                                    unsigned int block_height)
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
-    //! Health of the recent mined-block window for fee rate estimation.
-    enum class MempoolHealth {
-        //! Recent blocks represent the mempool well enough to estimate a fee rate.
-        HEALTHY,
-        //! Too few recent mined blocks to estimate a fee rate.
-        INSUFFICIENT_DATA,
-        //! Recent blocks include too few mempool transactions to estimate a fee rate.
-        LOW_COVERAGE,
-    };
+    /** Return health status, aggregate weights, coverage, and the tracked block window. */
+    HealthDiagnostics GetHealthDiagnostics(bool include_blocks = false) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
     MempoolHealth GetMempoolHealth() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
     //! Checks if recent mined blocks indicate a healthy mempool state.
     bool IsMempoolHealthy() const EXCLUSIVE_LOCKS_REQUIRED(!cs) { return GetMempoolHealth() == MempoolHealth::HEALTHY; }

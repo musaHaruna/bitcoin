@@ -10,7 +10,7 @@ Test the following RPCs:
 """
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_raises_rpc_error
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 class EstimateFeeTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -56,6 +56,34 @@ class EstimateFeeTest(BitcoinTestFramework):
         self.nodes[0].estimatesmartfee(1, 'ECONOMICAL', {"fee_rate_estimator": "mempool_policy"})
         self.nodes[0].estimatesmartfee(1, 'ECONOMICAL', {"fee_rate_estimator": "foo"})
         self.nodes[0].estimatesmartfee(1, 'ECONOMICAL', {'verbosity': 1, 'fee_rate_estimator': "none"})
+
+        # Verbosity 3 preserves both estimator errors and the failed combined
+        # selection, while also providing tip, fee-floor, and health context.
+        verbose_estimate = self.nodes[0].estimatesmartfee(
+            1,
+            'economical',
+            {'verbosity': 3, 'fee_rate_estimator': 'none'},
+        )
+        diagnostics = verbose_estimate['diagnostics']
+        assert_equal(diagnostics['requested_target'], 1)
+        assert_equal(diagnostics['estimate_mode'], 'economical')
+        assert_equal(diagnostics['requested_estimator'], 'none')
+        assert_equal(diagnostics['tip_consistent'], True)
+        assert_equal(diagnostics['tip_hash_before'], self.nodes[0].getbestblockhash())
+        assert_equal(diagnostics['tip_hash_after'], diagnostics['tip_hash_before'])
+        assert_equal(diagnostics['mempool_sequence_after'], diagnostics['mempool_sequence_before'])
+        assert_equal(diagnostics['mempool_consistent'], True)
+        assert_equal(diagnostics['snapshot_consistent'], True)
+        assert_equal(diagnostics['block_policy']['success'], False)
+        assert_equal(diagnostics['mempool_policy']['success'], False)
+        assert_equal(diagnostics['selection'], {'success': False, 'reason': 'both_estimators_error'})
+        assert_equal(diagnostics['mempool_health']['status'], 'insufficient_data')
+        assert_equal(diagnostics['mempool_health']['required_blocks'], 6)
+        assert diagnostics['mempool_health']['tracked_blocks'] < diagnostics['mempool_health']['required_blocks']
+        assert diagnostics['mempool_health']['total_block_weight'] >= 0
+        assert diagnostics['mempool_health']['mempool_txs_weight'] >= 0
+        assert_equal(diagnostics['mempool_health']['low_activity_bypass'], False)
+        assert 'mempool_template' not in diagnostics
 
         self.nodes[0].estimaterawfee(1)
         self.nodes[0].estimaterawfee(1, None)

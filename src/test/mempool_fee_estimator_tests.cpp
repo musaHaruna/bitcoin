@@ -114,17 +114,30 @@ BOOST_AUTO_TEST_CASE(mempool_fee_rate_estimator_cache)
     BOOST_CHECK(cache.IsStale());
     BOOST_CHECK(!cache.GetCachedEstimate(tip_hash));
 
-    cache.Update(conservative, economical, tip_hash);
+    cache.Update(conservative, economical, tip_hash, /*conservative_used_floor=*/true, /*economical_used_floor=*/false);
     BOOST_CHECK(!cache.IsStale());
     const auto cached{cache.GetCachedEstimate(tip_hash)};
     BOOST_REQUIRE(cached);
     BOOST_CHECK(cached->m_conservative == conservative);
     BOOST_CHECK(cached->m_economical == economical);
+    BOOST_CHECK(cached->m_conservative_used_floor);
+    BOOST_CHECK(!cached->m_economical_used_floor);
+    const auto diagnostics{cache.GetDiagnostics(tip_hash)};
+    BOOST_REQUIRE(diagnostics);
+    BOOST_CHECK(diagnostics->tip_hash == tip_hash);
+    BOOST_CHECK(diagnostics->estimate.m_conservative == conservative);
+    BOOST_CHECK(diagnostics->estimate.m_economical == economical);
+    BOOST_CHECK(diagnostics->estimate.m_conservative_used_floor);
+    BOOST_CHECK(!diagnostics->estimate.m_economical_used_floor);
+    BOOST_CHECK_GE(diagnostics->age.count(), 0);
+    BOOST_CHECK_LT(diagnostics->age.count(), std::chrono::duration_cast<std::chrono::milliseconds>(CACHE_LIFE).count());
     BOOST_CHECK(!cache.GetCachedEstimate(next_tip_hash));
+    BOOST_CHECK(!cache.GetDiagnostics(next_tip_hash));
 
     SetMockTime(GetTime<std::chrono::seconds>() + CACHE_LIFE + std::chrono::seconds{1});
     BOOST_CHECK(cache.IsStale());
     BOOST_CHECK(!cache.GetCachedEstimate(tip_hash));
+    BOOST_CHECK(!cache.GetDiagnostics(tip_hash));
     SetMockTime(0);
 }
 
@@ -144,6 +157,16 @@ BOOST_AUTO_TEST_CASE(MempoolFeeRateEstimator)
 
     BOOST_CHECK(!mempool_estimator.IsMempoolHealthy());
     BOOST_CHECK(mempool_estimator.GetMempoolHealth() == MemPoolFeeRateEstimator::MempoolHealth::INSUFFICIENT_DATA);
+    {
+        const auto health{mempool_estimator.GetHealthDiagnostics()};
+        BOOST_CHECK(health.health == MemPoolFeeRateEstimator::MempoolHealth::INSUFFICIENT_DATA);
+        BOOST_CHECK_EQUAL(health.tracked_blocks, 0);
+        BOOST_CHECK_EQUAL(health.total_block_weight, 0);
+        BOOST_CHECK_EQUAL(health.total_removed_weight, 0);
+        BOOST_CHECK_EQUAL(health.minimum_representative_window_weight, DEFAULT_BLOCK_MAX_WEIGHT);
+        BOOST_CHECK(!health.coverage_ratio);
+        BOOST_CHECK(!health.low_activity_bypass);
+    }
     {
         const auto result = mempool_estimator.EstimateFeeRate(/*conservative=*/true);
         const std::string insufficient_err{strprintf("%s: Not enough recent block data for fee rate estimation",
@@ -170,6 +193,11 @@ BOOST_AUTO_TEST_CASE(MempoolFeeRateEstimator)
         // poor coverage in the only non-empty block is too noisy to reject the
         // mempool as unhealthy.
         BOOST_CHECK(custom_mempool_estimator.IsMempoolHealthy());
+        const auto health{custom_mempool_estimator.GetHealthDiagnostics()};
+        BOOST_CHECK(health.health == MemPoolFeeRateEstimator::MempoolHealth::HEALTHY);
+        BOOST_CHECK_EQUAL(health.tracked_blocks, MEMPOOL_HEALTH_WINDOW_BLOCKS);
+        BOOST_CHECK(health.coverage_ratio);
+        BOOST_CHECK(health.low_activity_bypass);
     }
     size_t block_count = 1;
     const int64_t weight{DEFAULT_BLOCK_MAX_WEIGHT / 2};
@@ -184,6 +212,14 @@ BOOST_AUTO_TEST_CASE(MempoolFeeRateEstimator)
     }
     // Total txs weight ~11999k WU (~3.0 blocks), removed txs ~11999k WU (~3.0 blocks); coverage = 100%.
     BOOST_CHECK(mempool_estimator.IsMempoolHealthy());
+    {
+        const auto health{mempool_estimator.GetHealthDiagnostics()};
+        BOOST_CHECK(health.health == MemPoolFeeRateEstimator::MempoolHealth::HEALTHY);
+        BOOST_CHECK_EQUAL(health.tracked_blocks, MEMPOOL_HEALTH_WINDOW_BLOCKS);
+        BOOST_REQUIRE(health.coverage_ratio);
+        BOOST_CHECK_CLOSE(*health.coverage_ratio, 1.0, 0.01);
+        BOOST_CHECK(!health.low_activity_bypass);
+    }
     // Adding a single underrepresented block will not make the mempool unhealthy
     // while the window coverage remains above the threshold.
     AddRemovedBlock(mempool_estimator, weight / 2, weight, height);
@@ -291,12 +327,18 @@ BOOST_AUTO_TEST_CASE(MempoolFeeRateEstimator)
             }
         }
         SetMockTime(GetTime<std::chrono::seconds>() + CACHE_LIFE + std::chrono::seconds{1});
-        const auto conservative = mempool_estimator.EstimateFeeRate(/*conservative=*/true);
-        const auto economical = mempool_estimator.EstimateFeeRate(/*conservative=*/false);
-        BOOST_REQUIRE(conservative.has_value());
-        BOOST_REQUIRE(economical.has_value());
-        BOOST_CHECK(conservative->feerate == FeeFrac(med_fee, tx_vsize));
-        BOOST_CHECK(economical->feerate == floor);
+        const auto conservative = mempool_estimator.EstimateFeeRateWithDiagnostics(/*conservative=*/true);
+        const auto economical = mempool_estimator.EstimateFeeRateWithDiagnostics(/*conservative=*/false);
+        BOOST_REQUIRE(conservative.estimate.has_value());
+        BOOST_REQUIRE(economical.estimate.has_value());
+        BOOST_CHECK(conservative.estimate->feerate == FeeFrac(med_fee, tx_vsize));
+        BOOST_CHECK(economical.estimate->feerate == floor);
+        BOOST_REQUIRE(conservative.cache);
+        BOOST_REQUIRE(economical.cache);
+        BOOST_CHECK(!conservative.cache_hit);
+        BOOST_CHECK(economical.cache_hit);
+        BOOST_CHECK(!conservative.cache->estimate.m_conservative_used_floor);
+        BOOST_CHECK(conservative.cache->estimate.m_economical_used_floor);
     }
     // Mempool transactions are enough to provide both feerate estimates.
     {

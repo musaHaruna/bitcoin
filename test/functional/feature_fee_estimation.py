@@ -527,7 +527,7 @@ class EstimateFeeTest(BitcoinTestFramework):
         utxos = [self.wallet.get_utxo(confirmed_only=True) for _ in range(num_txs)]
         insane_feerate = Decimal("0.01")
         self.send_transactions(utxos, insane_feerate, target_vsize)
-        estimate_after_spike = node0.estimatesmartfee(1, "economical", {"verbosity": 2, "fee_rate_estimator": "none"})
+        estimate_after_spike = node0.estimatesmartfee(1, "economical", {"verbosity": 3, "fee_rate_estimator": "none"})
         assert_equal(len(estimate_after_spike["mempool_health_statistics"]), 6)
         current_height = node0.getchaintips()[0]['height']
         for block_stat in estimate_after_spike["mempool_health_statistics"]:
@@ -537,6 +537,49 @@ class EstimateFeeTest(BitcoinTestFramework):
             assert block_stat['mempool_txs_weight']
         verify_estimate_response(estimate_after_spike, high_feerate, [])
         assert_equal(estimate_after_spike["estimator"], "block_policy")
+        diagnostics = estimate_after_spike["diagnostics"]
+        assert_equal(diagnostics["tip_consistent"], True)
+        assert_equal(diagnostics["mempool_consistent"], True)
+        assert_equal(diagnostics["snapshot_consistent"], True)
+        assert_equal(diagnostics["tip_hash_before"], node0.getbestblockhash())
+        assert_equal(diagnostics["tip_hash_after"], diagnostics["tip_hash_before"])
+        assert_equal(diagnostics["block_policy"]["success"], True)
+        assert_equal(diagnostics["block_policy"]["feerate_before_rpc_floor"], high_feerate)
+        assert diagnostics["block_policy"]["feerate_fee_sats"] > 0
+        assert diagnostics["block_policy"]["feerate_vsize"] > 0
+        assert_equal(diagnostics["mempool_policy"]["success"], True)
+        assert_equal(diagnostics["mempool_policy"]["feerate_before_rpc_floor"], insane_feerate)
+        assert diagnostics["mempool_policy"]["feerate_fee_sats"] > 0
+        assert diagnostics["mempool_policy"]["feerate_vsize"] > 0
+        assert_equal(diagnostics["selection"]["success"], True)
+        assert_equal(diagnostics["selection"]["reason"], "block_policy_lower")
+        assert_equal(diagnostics["selection"]["estimator"], "block_policy")
+        assert_equal(diagnostics["selection"]["feerate_before_rpc_floor"], high_feerate)
+        assert_equal(diagnostics["selection"]["feerate_fee_sats"], diagnostics["block_policy"]["feerate_fee_sats"])
+        assert_equal(diagnostics["selection"]["feerate_vsize"], diagnostics["block_policy"]["feerate_vsize"])
+        assert_equal(diagnostics["selection"]["feerate_after_rpc_floor"], high_feerate)
+        assert_equal(diagnostics["selection"]["fee_floor_applied"], False)
+        assert_equal(diagnostics["mempool_template"]["p50"], insane_feerate)
+        assert_equal(diagnostics["mempool_template"]["p75"], insane_feerate)
+        assert_equal(diagnostics["mempool_template"]["p50_used_fee_floor"], False)
+        assert_equal(diagnostics["mempool_template"]["p75_used_fee_floor"], False)
+        assert_equal(diagnostics["mempool_template"]["cache_hit"], False)
+        assert_equal(diagnostics["mempool_template"]["tip_hash"], node0.getbestblockhash())
+        assert diagnostics["mempool_template"]["cache_age_ms"] >= 0
+        assert diagnostics["mempool_template"]["cache_age_ms"] <= diagnostics["mempool_template"]["cache_lifetime_ms"]
+        health = diagnostics["mempool_health"]
+        assert_equal(health["status"], "healthy")
+        assert_equal(health["tracked_blocks"], 6)
+        if health["low_activity_bypass"]:
+            assert health["total_block_weight"] < health["minimum_representative_window_weight"]
+        else:
+            assert health["coverage_ratio"] >= health["required_coverage_ratio"]
+        cached_diagnostics = node0.estimatesmartfee(
+            1, "economical", {"verbosity": 3, "fee_rate_estimator": "none"}
+        )["diagnostics"]
+        assert_equal(cached_diagnostics["mempool_template"]["cache_hit"], True)
+        assert_equal(cached_diagnostics["mempool_template"]["p50"], diagnostics["mempool_template"]["p50"])
+        assert_equal(cached_diagnostics["mempool_template"]["p75"], diagnostics["mempool_template"]["p75"])
         mempool_policy_estimate = node0.estimatesmartfee(1, "economical", {"fee_rate_estimator": "mempool_policy"})
         verify_estimate_response(mempool_policy_estimate, insane_feerate, [])
         # Confirm the spike transactions so they leave the mempool; the mined block
@@ -547,8 +590,12 @@ class EstimateFeeTest(BitcoinTestFramework):
         low_feerate = Decimal("0.00004")
         low_utxos = [self.wallet.get_utxo(confirmed_only=True) for _ in range(num_txs)]
         self.send_transactions(low_utxos, low_feerate, target_vsize)
-        lower_estimate = node0.estimatesmartfee(1, "economical", {"fee_rate_estimator": "none"})
+        lower_estimate = node0.estimatesmartfee(1, "economical", {"verbosity": 3, "fee_rate_estimator": "none"})
         verify_estimate_response(lower_estimate, low_feerate, [])
+        assert_equal(lower_estimate["diagnostics"]["block_policy"]["feerate_before_rpc_floor"], high_feerate)
+        assert_equal(lower_estimate["diagnostics"]["mempool_policy"]["feerate_before_rpc_floor"], low_feerate)
+        assert_equal(lower_estimate["diagnostics"]["selection"]["reason"], "mempool_policy_lower")
+        assert_equal(lower_estimate["diagnostics"]["selection"]["estimator"], "mempool_policy")
         # The mempool block stats are persisted across restarts, so the mempool
         # stays healthy and the lower mempool estimate is still returned after a
         # restart. Without persistence, the combined estimate would return a
@@ -567,9 +614,16 @@ class EstimateFeeTest(BitcoinTestFramework):
         # That floor is lower than the block policy estimate, so the combined estimator returns it.
         mempool_info = node0.getmempoolinfo()
         floor = max(mempool_info["minrelaytxfee"], mempool_info["mempoolminfee"])
-        combined_estimate = node0.estimatesmartfee(1, "economical", {"fee_rate_estimator": "none"})
+        combined_estimate = node0.estimatesmartfee(1, "economical", {"verbosity": 3, "fee_rate_estimator": "none"})
         verify_estimate_response(combined_estimate, floor, [])
         assert_equal(combined_estimate["estimator"], "mempool_policy")
+        diagnostics = combined_estimate["diagnostics"]
+        assert_equal(diagnostics["mempool_policy"]["feerate_before_rpc_floor"], floor)
+        assert_equal(diagnostics["selection"]["estimator"], "mempool_policy")
+        assert_equal(diagnostics["mempool_template"]["p50"], floor)
+        assert_equal(diagnostics["mempool_template"]["p75"], floor)
+        assert_equal(diagnostics["mempool_template"]["p50_used_fee_floor"], True)
+        assert_equal(diagnostics["mempool_template"]["p75_used_fee_floor"], True)
 
     def test_stale_mempool_block_stats_are_rejected_on_load(self):
         # Persisted mempool block stats must be tied to the best block hash,
