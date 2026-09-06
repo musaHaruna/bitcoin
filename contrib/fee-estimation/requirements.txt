@@ -1,0 +1,2 @@
+# Optional dependency used only for PNG chart generation.
+matplotlib>=3.9
