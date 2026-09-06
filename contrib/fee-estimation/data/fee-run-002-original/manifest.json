@@ -1,0 +1,320 @@
+{
+  "collection": {
+    "block_wait_timeout_ms": 15000,
+    "block_watcher": true,
+    "interval_seconds": 30.0,
+    "max_backfill_blocks": 2016,
+    "modes": [
+      "economical",
+      "conservative"
+    ],
+    "outcome_deadline_utc": "2026-09-05T09:27:14.682Z",
+    "outcome_tail_blocks": 144,
+    "outcome_tail_seconds": 0.0,
+    "provider_ca_file": null,
+    "provider_interval_seconds": 60.0,
+    "provider_max_bytes": 2000000,
+    "provider_timeout_seconds": 15.0,
+    "providers": [
+      {
+        "name": "blockstream",
+        "url": "https://blockstream.info/api/fee-estimates",
+        "url_redacted": false
+      },
+      {
+        "name": "mempool_space",
+        "url": "https://mempool.space/api/v1/fees/recommended",
+        "url_redacted": false
+      }
+    ],
+    "rpc_timeout_seconds": 30.0,
+    "sample_duration_seconds": 86400.0,
+    "sample_on_block": true,
+    "sampling_deadline_utc": "2026-09-05T09:27:14.682Z",
+    "sampling_started_utc": "2026-09-04T09:27:14.682Z",
+    "targets": [
+      1,
+      2,
+      3,
+      6,
+      12,
+      24,
+      48,
+      72,
+      144
+    ]
+  },
+  "collector": "collect_fee_estimates.py",
+  "created_utc": "2026-09-04T09:27:14.682Z",
+  "experiment_id": "a1e8f706-fbf9-45d4-bf6e-38e00de3cbc5",
+  "preflight": {
+    "chain": {
+      "error": null,
+      "result": {
+        "automatic_pruning": true,
+        "backgroundvalidation": {
+          "bestblockhash": "000000000000000010efb1f15ce0e21233948e50c29297c554dcee8e41bd83e5",
+          "blocks": 370912,
+          "chainwork": "0000000000000000000000000000000000000000000975acfefbadf56a236bd0",
+          "mediantime": 1440186009,
+          "snapshotheight": 935000,
+          "verificationprogress": 0.06183612017712847
+        },
+        "bestblockhash": "0000000000000000000189026da7d21f973d0cc81df1a4d920d68cbe10d127fa",
+        "bits": "17023cc1",
+        "blocks": 965454,
+        "chain": "main",
+        "chainwork": "000000000000000000000000000000000000000144b540a61e52c2d3eb8a0f69",
+        "difficulty": 125807076547197.5,
+        "headers": 965454,
+        "initialblockdownload": false,
+        "mediantime": 1788510471,
+        "prune_target_size": 10485760000,
+        "pruned": true,
+        "pruneheight": 965050,
+        "size_on_disk": 5194443296,
+        "target": "000000000000000000023cc10000000000000000000000000000000000000000",
+        "time": 1788513056,
+        "verificationprogress": 1,
+        "warnings": [
+          "This is a pre-release test build - use at your own risk - do not use for mining or merchant applications"
+        ]
+      }
+    },
+    "chainstates": {
+      "error": null,
+      "result": {
+        "chainstates": [
+          {
+            "bestblockhash": "000000000000000010efb1f15ce0e21233948e50c29297c554dcee8e41bd83e5",
+            "bits": "1814dd04",
+            "blocks": 370912,
+            "coins_db_cache_bytes": 7969177,
+            "coins_tip_cache_bytes": 1010093260,
+            "difficulty": 52699842409.34701,
+            "target": "000000000000000014dd04000000000000000000000000000000000000000000",
+            "validated": true,
+            "verificationprogress": 0.05746465203532326
+          },
+          {
+            "bestblockhash": "0000000000000000000189026da7d21f973d0cc81df1a4d920d68cbe10d127fa",
+            "bits": "17023cc1",
+            "blocks": 965454,
+            "coins_db_cache_bytes": 419430,
+            "coins_tip_cache_bytes": 53162803,
+            "difficulty": 125807076547197.5,
+            "snapshot_blockhash": "0000000000000000000147034958af1652b2b91bba607beacc5e72a56f0fb5ee",
+            "target": "000000000000000000023cc10000000000000000000000000000000000000000",
+            "validated": false,
+            "verificationprogress": 1
+          }
+        ],
+        "headers": 965454
+      }
+    },
+    "diagnostic": {
+      "error": null,
+      "result": {
+        "blocks": 2,
+        "diagnostics": {
+          "block_policy": {
+            "blocks": 2,
+            "feerate_before_rpc_floor": 1.19e-05,
+            "feerate_fee_sats": 1190,
+            "feerate_vsize": 1000,
+            "success": true
+          },
+          "estimate_mode": "economical",
+          "fee_floor": {
+            "effective": 1e-06,
+            "mempool_min": 0.0,
+            "min_relay": 1e-06
+          },
+          "mempool_consistent": true,
+          "mempool_health": {
+            "coverage_ratio": 0.0001945034875782032,
+            "low_activity_bypass": false,
+            "mempool_txs_weight": 4659,
+            "minimum_representative_window_weight": 4000000,
+            "required_blocks": 6,
+            "required_coverage_ratio": 0.75,
+            "status": "low_coverage",
+            "total_block_weight": 23953298,
+            "tracked_blocks": 6,
+            "window_tip_hash": "0000000000000000000189026da7d21f973d0cc81df1a4d920d68cbe10d127fa"
+          },
+          "mempool_policy": {
+            "blocks": 2,
+            "error": "mempool_policy: Mempool is unreliable for fee rate estimation",
+            "success": false
+          },
+          "mempool_sequence_after": 26585,
+          "mempool_sequence_before": 26585,
+          "requested_estimator": "none",
+          "requested_target": 2,
+          "selection": {
+            "reason": "mempool_policy_error",
+            "success": false
+          },
+          "snapshot_consistent": true,
+          "tip_consistent": true,
+          "tip_hash_after": "0000000000000000000189026da7d21f973d0cc81df1a4d920d68cbe10d127fa",
+          "tip_hash_before": "0000000000000000000189026da7d21f973d0cc81df1a4d920d68cbe10d127fa",
+          "tip_height_after": 965454,
+          "tip_height_before": 965454
+        },
+        "errors": [
+          "mempool_policy: Mempool is unreliable for fee rate estimation"
+        ],
+        "mempool_health_statistics": [
+          {
+            "block_height": 965454,
+            "block_weight": 3993924,
+            "mempool_txs_weight": 4659
+          },
+          {
+            "block_height": 965453,
+            "block_weight": 3991880,
+            "mempool_txs_weight": 0
+          },
+          {
+            "block_height": 965452,
+            "block_weight": 3991967,
+            "mempool_txs_weight": 0
+          },
+          {
+            "block_height": 965451,
+            "block_weight": 3991588,
+            "mempool_txs_weight": 0
+          },
+          {
+            "block_height": 965450,
+            "block_weight": 3991976,
+            "mempool_txs_weight": 0
+          },
+          {
+            "block_height": 965449,
+            "block_weight": 3991963,
+            "mempool_txs_weight": 0
+          }
+        ]
+      }
+    },
+    "latency_ms": 6.414,
+    "mempool": {
+      "error": null,
+      "result": {
+        "bytes": 1029626,
+        "incrementalrelayfee": 1e-06,
+        "limitclustercount": 64,
+        "limitclustersize": 101000,
+        "loaded": true,
+        "maxdatacarriersize": 100000,
+        "maxmempool": 300000000,
+        "mempoolminfee": 1e-06,
+        "minrelaytxfee": 1e-06,
+        "optimal": true,
+        "permitbaremultisig": true,
+        "size": 3642,
+        "total_fee": 0.02346882,
+        "unbroadcastcount": 0,
+        "usage": 6143800
+      }
+    },
+    "network": {
+      "error": null,
+      "result": {
+        "connections": 11,
+        "connections_in": 0,
+        "connections_out": 11,
+        "incrementalfee": 1e-06,
+        "inv_buckets": {
+          "inbound": {
+            "backlog": 0,
+            "count_tok": 420,
+            "size_tok": 23225877.64000002
+          },
+          "outbound": {
+            "backlog": 0,
+            "count_tok": 420,
+            "size_tok": 42256714.60000004
+          }
+        },
+        "localaddresses": [],
+        "localrelay": true,
+        "localservices": "0000000000000c08",
+        "localservicesnames": [
+          "WITNESS",
+          "NETWORK_LIMITED",
+          "P2P_V2"
+        ],
+        "networkactive": true,
+        "networks": [
+          {
+            "limited": false,
+            "name": "ipv4",
+            "proxy": "",
+            "proxy_randomize_credentials": false,
+            "reachable": true
+          },
+          {
+            "limited": false,
+            "name": "ipv6",
+            "proxy": "",
+            "proxy_randomize_credentials": false,
+            "reachable": true
+          },
+          {
+            "limited": true,
+            "name": "onion",
+            "proxy": "",
+            "proxy_randomize_credentials": false,
+            "reachable": false
+          },
+          {
+            "limited": true,
+            "name": "i2p",
+            "proxy": "",
+            "proxy_randomize_credentials": false,
+            "reachable": false
+          },
+          {
+            "limited": true,
+            "name": "cjdns",
+            "proxy": "",
+            "proxy_randomize_credentials": false,
+            "reachable": false
+          }
+        ],
+        "protocolversion": 70017,
+        "relayfee": 1e-06,
+        "subversion": "/Satoshi:31.99.0/",
+        "timeoffset": 0,
+        "tx_send_rate": 14,
+        "version": 319900,
+        "warnings": [
+          "This is a pre-release test build - use at your own risk - do not use for mining or merchant applications"
+        ]
+      }
+    },
+    "uptime": {
+      "error": null,
+      "result": 642
+    },
+    "warnings": []
+  },
+  "python_version": "3.14.2",
+  "record_type": "experiment_manifest",
+  "rpc": {
+    "authentication": "cookie",
+    "cookie_path": "<FEE_NODE_DATADIR>/.cookie",
+    "datadir": "<FEE_NODE_DATADIR>",
+    "url": "http://127.0.0.1:8332/"
+  },
+  "schema_version": 1,
+  "units": {
+    "block_stats_feerate": "sat/vB",
+    "diagnostic_exact_ratio": "feerate_fee_sats / feerate_vsize = sat/vB",
+    "rpc_formatted_feerate": "BTC/kvB"
+  }
+}
