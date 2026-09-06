@@ -1,0 +1,15 @@
+{
+  "experiment_id": "11d55919-d99b-4de6-bfc9-518fec510a46",
+  "last_sample_tip_height": 965336,
+  "next_batch_sequence": 376,
+  "outcome_deadline_utc": "2026-09-06T09:21:30.232Z",
+  "outcome_required_height": null,
+  "phase": "interrupted",
+  "record_type": "run_state",
+  "run_id": "35170539-ef99-40ef-b5b0-94a3254e937b",
+  "sampling_deadline_utc": "2026-09-06T09:21:30.232Z",
+  "schema_version": 1,
+  "tip_hash": "00000000000000000000a6eb26611137b9c1fd20fafba8a585b0d33a46c1511e",
+  "tip_height": 965336,
+  "updated_utc": "2026-09-04T05:23:39.599Z"
+}

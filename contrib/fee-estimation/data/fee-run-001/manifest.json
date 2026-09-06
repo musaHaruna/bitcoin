@@ -1,0 +1,322 @@
+{
+  "collection": {
+    "block_wait_timeout_ms": 15000,
+    "block_watcher": true,
+    "interval_seconds": 30.0,
+    "max_backfill_blocks": 2016,
+    "modes": [
+      "economical",
+      "conservative"
+    ],
+    "outcome_deadline_utc": "2026-09-06T09:21:30.232Z",
+    "outcome_tail_blocks": 144,
+    "outcome_tail_seconds": 0.0,
+    "provider_ca_file": "/etc/ssl/cert.pem",
+    "provider_interval_seconds": 60.0,
+    "provider_max_bytes": 2000000,
+    "provider_timeout_seconds": 15.0,
+    "providers": [
+      {
+        "name": "blockstream",
+        "url": "https://blockstream.info/api/fee-estimates",
+        "url_redacted": false
+      },
+      {
+        "name": "mempool_space",
+        "url": "https://mempool.space/api/v1/fees/recommended",
+        "url_redacted": false
+      }
+    ],
+    "rpc_timeout_seconds": 30.0,
+    "sample_duration_seconds": 259200.0,
+    "sample_on_block": true,
+    "sampling_deadline_utc": "2026-09-06T09:21:30.232Z",
+    "sampling_started_utc": "2026-09-03T09:21:30.232Z",
+    "targets": [
+      1,
+      2,
+      3,
+      6,
+      12,
+      24,
+      48,
+      72,
+      144
+    ]
+  },
+  "collector": "collect_fee_estimates.py",
+  "created_utc": "2026-09-03T09:21:30.232Z",
+  "experiment_id": "11d55919-d99b-4de6-bfc9-518fec510a46",
+  "preflight": {
+    "chain": {
+      "error": null,
+      "result": {
+        "automatic_pruning": true,
+        "backgroundvalidation": {
+          "bestblockhash": "00000000000000b26e4528e3c6e13b28b8f248ed72f8661f02211448261544f4",
+          "blocks": 238437,
+          "chainwork": "000000000000000000000000000000000000000000000047694f51643fd371b8",
+          "mediantime": 1369790876,
+          "snapshotheight": 935000,
+          "verificationprogress": 0.01423833913419261
+        },
+        "bestblockhash": "00000000000000000001d5c56a041d5472421821b4743d1ea6742c0623d63e2f",
+        "bits": "17023cc1",
+        "blocks": 965278,
+        "chain": "main",
+        "chainwork": "000000000000000000000000000000000000000144669644c0f72f27504bde99",
+        "difficulty": 125807076547197.5,
+        "headers": 965290,
+        "initialblockdownload": false,
+        "mediantime": 1788418982,
+        "prune_target_size": 10485760000,
+        "pruned": true,
+        "pruneheight": 963959,
+        "size_on_disk": 5192675605,
+        "target": "000000000000000000023cc10000000000000000000000000000000000000000",
+        "time": 1788422008,
+        "verificationprogress": 0.999972821106372,
+        "warnings": [
+          "This is a pre-release test build - use at your own risk - do not use for mining or merchant applications"
+        ]
+      }
+    },
+    "chainstates": {
+      "error": null,
+      "result": {
+        "chainstates": [
+          {
+            "bestblockhash": "00000000000000b26e4528e3c6e13b28b8f248ed72f8661f02211448261544f4",
+            "bits": "1a016164",
+            "blocks": 238437,
+            "coins_db_cache_bytes": 7969177,
+            "coins_tip_cache_bytes": 1010093260,
+            "difficulty": 12153411.70977583,
+            "target": "0000000000000161640000000000000000000000000000000000000000000000",
+            "validated": true,
+            "verificationprogress": 0.01323618282290696
+          },
+          {
+            "bestblockhash": "00000000000000000001d5c56a041d5472421821b4743d1ea6742c0623d63e2f",
+            "bits": "17023cc1",
+            "blocks": 965278,
+            "coins_db_cache_bytes": 419430,
+            "coins_tip_cache_bytes": 53162803,
+            "difficulty": 125807076547197.5,
+            "snapshot_blockhash": "0000000000000000000147034958af1652b2b91bba607beacc5e72a56f0fb5ee",
+            "target": "000000000000000000023cc10000000000000000000000000000000000000000",
+            "validated": false,
+            "verificationprogress": 0.999972821106372
+          }
+        ],
+        "headers": 965290
+      }
+    },
+    "diagnostic": {
+      "error": null,
+      "result": {
+        "blocks": 2,
+        "diagnostics": {
+          "block_policy": {
+            "blocks": 2,
+            "feerate_before_rpc_floor": 3.35e-06,
+            "feerate_fee_sats": 335,
+            "feerate_vsize": 1000,
+            "success": true
+          },
+          "estimate_mode": "economical",
+          "fee_floor": {
+            "effective": 1e-06,
+            "mempool_min": 0.0,
+            "min_relay": 1e-06
+          },
+          "mempool_consistent": true,
+          "mempool_health": {
+            "coverage_ratio": 0.005013542651744765,
+            "low_activity_bypass": false,
+            "mempool_txs_weight": 120096,
+            "minimum_representative_window_weight": 4000000,
+            "required_blocks": 6,
+            "required_coverage_ratio": 0.75,
+            "status": "low_coverage",
+            "total_block_weight": 23954319,
+            "tracked_blocks": 6,
+            "window_tip_hash": "00000000000000000001d5c56a041d5472421821b4743d1ea6742c0623d63e2f"
+          },
+          "mempool_policy": {
+            "blocks": 2,
+            "error": "mempool_policy: Mempool is unreliable for fee rate estimation",
+            "success": false
+          },
+          "mempool_sequence_after": 1619,
+          "mempool_sequence_before": 1619,
+          "requested_estimator": "none",
+          "requested_target": 2,
+          "selection": {
+            "reason": "mempool_policy_error",
+            "success": false
+          },
+          "snapshot_consistent": true,
+          "tip_consistent": true,
+          "tip_hash_after": "00000000000000000001d5c56a041d5472421821b4743d1ea6742c0623d63e2f",
+          "tip_hash_before": "00000000000000000001d5c56a041d5472421821b4743d1ea6742c0623d63e2f",
+          "tip_height_after": 965278,
+          "tip_height_before": 965278
+        },
+        "errors": [
+          "mempool_policy: Mempool is unreliable for fee rate estimation"
+        ],
+        "mempool_health_statistics": [
+          {
+            "block_height": 965278,
+            "block_weight": 3991774,
+            "mempool_txs_weight": 0
+          },
+          {
+            "block_height": 965277,
+            "block_weight": 3995358,
+            "mempool_txs_weight": 0
+          },
+          {
+            "block_height": 965276,
+            "block_weight": 3991741,
+            "mempool_txs_weight": 13379
+          },
+          {
+            "block_height": 965275,
+            "block_weight": 3991560,
+            "mempool_txs_weight": 0
+          },
+          {
+            "block_height": 965274,
+            "block_weight": 3991962,
+            "mempool_txs_weight": 5018
+          },
+          {
+            "block_height": 965273,
+            "block_weight": 3991924,
+            "mempool_txs_weight": 101699
+          }
+        ]
+      }
+    },
+    "latency_ms": 4.389,
+    "mempool": {
+      "error": null,
+      "result": {
+        "bytes": 13690,
+        "incrementalrelayfee": 1e-06,
+        "limitclustercount": 64,
+        "limitclustersize": 101000,
+        "loaded": true,
+        "maxdatacarriersize": 100000,
+        "maxmempool": 300000000,
+        "mempoolminfee": 1e-06,
+        "minrelaytxfee": 1e-06,
+        "optimal": true,
+        "permitbaremultisig": true,
+        "size": 58,
+        "total_fee": 0.00032027,
+        "unbroadcastcount": 0,
+        "usage": 82072
+      }
+    },
+    "network": {
+      "error": null,
+      "result": {
+        "connections": 9,
+        "connections_in": 0,
+        "connections_out": 9,
+        "incrementalfee": 1e-06,
+        "inv_buckets": {
+          "inbound": {
+            "backlog": 0,
+            "count_tok": 420,
+            "size_tok": 12639599.60000001
+          },
+          "outbound": {
+            "backlog": 0,
+            "count_tok": 420,
+            "size_tok": 13628104.99999999
+          }
+        },
+        "localaddresses": [],
+        "localrelay": true,
+        "localservices": "0000000000000c08",
+        "localservicesnames": [
+          "WITNESS",
+          "NETWORK_LIMITED",
+          "P2P_V2"
+        ],
+        "networkactive": true,
+        "networks": [
+          {
+            "limited": false,
+            "name": "ipv4",
+            "proxy": "",
+            "proxy_randomize_credentials": false,
+            "reachable": true
+          },
+          {
+            "limited": false,
+            "name": "ipv6",
+            "proxy": "",
+            "proxy_randomize_credentials": false,
+            "reachable": true
+          },
+          {
+            "limited": true,
+            "name": "onion",
+            "proxy": "",
+            "proxy_randomize_credentials": false,
+            "reachable": false
+          },
+          {
+            "limited": true,
+            "name": "i2p",
+            "proxy": "",
+            "proxy_randomize_credentials": false,
+            "reachable": false
+          },
+          {
+            "limited": true,
+            "name": "cjdns",
+            "proxy": "",
+            "proxy_randomize_credentials": false,
+            "reachable": false
+          }
+        ],
+        "protocolversion": 70017,
+        "relayfee": 1e-06,
+        "subversion": "/Satoshi:31.99.0/",
+        "timeoffset": 0,
+        "tx_send_rate": 14,
+        "version": 319900,
+        "warnings": [
+          "This is a pre-release test build - use at your own risk - do not use for mining or merchant applications"
+        ]
+      }
+    },
+    "uptime": {
+      "error": null,
+      "result": 40
+    },
+    "warnings": [
+      "active chainstate has not reached the best known header"
+    ]
+  },
+  "python_version": "3.14.2",
+  "record_type": "experiment_manifest",
+  "rpc": {
+    "authentication": "cookie",
+    "cookie_path": "<FEE_NODE_DATADIR>/.cookie",
+    "datadir": "<FEE_NODE_DATADIR>",
+    "url": "http://127.0.0.1:8332/"
+  },
+  "schema_version": 1,
+  "units": {
+    "block_stats_feerate": "sat/vB",
+    "diagnostic_exact_ratio": "feerate_fee_sats / feerate_vsize = sat/vB",
+    "rpc_formatted_feerate": "BTC/kvB"
+  }
+}
