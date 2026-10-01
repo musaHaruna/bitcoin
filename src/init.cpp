@@ -1484,7 +1484,6 @@ static ChainstateLoadResult InitAndLoadChainstate(
     node::ChainstateLoadOptions options;
     options.mempool = Assert(node.mempool.get());
     options.wipe_chainstate_db = do_reindex || do_reindex_chainstate;
-    options.prune = Assert(node.blockman)->IsPruneMode();
     options.check_blocks = args.GetIntArg("-checkblocks", DEFAULT_CHECKBLOCKS);
     options.check_level = args.GetIntArg("-checklevel", DEFAULT_CHECKLEVEL);
     options.require_full_verification = args.IsArgSet("-checkblocks") || args.IsArgSet("-checklevel");
