@@ -16,6 +16,7 @@
 #include <kernel/messagestartchars.h>
 #include <kernel/notifications_interface.h>
 #include <kernel/types.h>
+#include <logging/timer.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -805,6 +806,31 @@ bool BlockManager::FlushChainstateBlockFile(int tip_height)
         return FlushBlockFile(cursor->file_num, /*fFinalize=*/false, /*finalize_undo=*/false);
     }
     // No need to log warnings in this case.
+    return true;
+}
+
+bool BlockManager::WriteBlockStorage(int tip_height, const std::set<int>& files_to_prune)
+{
+    AssertLockHeld(::cs_main);
+    {
+        LOG_TIME_MILLIS_WITH_CATEGORY("write block and undo data to disk", BCLog::BENCH);
+
+        // First make sure all block and undo data is flushed to disk.
+        if (!FlushChainstateBlockFile(tip_height)) return false;
+    }
+
+    // Then update all block file information (which may refer to block and undo files).
+    {
+        LOG_TIME_MILLIS_WITH_CATEGORY("write block index to disk", BCLog::BENCH);
+
+        WriteBlockIndexDB();
+    }
+    // Finally remove any pruned files
+    if (!files_to_prune.empty()) {
+        LOG_TIME_MILLIS_WITH_CATEGORY("unlink pruned files", BCLog::BENCH);
+
+        UnlinkPrunedFiles(files_to_prune);
+    }
     return true;
 }
 
