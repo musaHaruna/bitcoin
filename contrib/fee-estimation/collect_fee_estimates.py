@@ -120,6 +120,7 @@ class JSONRPCClient:
     def __init__(self, cookie: pathlib.Path, *, timeout: float) -> None:
         self._cookie = cookie
         self._timeout = timeout
+        self._path = "/"
         self._connection: http.client.HTTPConnection | None = None
         self._lock = threading.Lock()
 

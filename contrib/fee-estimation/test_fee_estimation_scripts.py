@@ -58,6 +58,13 @@ class CollectorHelpersTest(unittest.TestCase):
             with self.assertRaises(Exception):
                 self.collector.parse_duration(invalid)
 
+    def test_rpc_client_uses_root_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client = self.collector.JSONRPCClient(
+                Path(directory) / ".cookie", timeout=30
+            )
+            self.assertEqual(client._path, "/")
+
 
 class AnalyzerHelpersTest(unittest.TestCase):
     @classmethod
