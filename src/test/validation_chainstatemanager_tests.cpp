@@ -6,6 +6,7 @@
 #include <consensus/validation.h>
 #include <kernel/disconnected_transactions.h>
 #include <node/block_template_manager.h>
+#include <node/blockstorage.h>
 #include <node/chainstatemanager_args.h>
 #include <node/kernel_notifications.h>
 #include <node/utxo_snapshot.h>
@@ -36,6 +37,79 @@ using node::KernelNotifications;
 using node::SnapshotMetadata;
 
 BOOST_FIXTURE_TEST_SUITE(validation_chainstatemanager_tests, TestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(precomputed_block_prune_policy, RegTestingSetup)
+{
+    auto& manager{*Assert(m_node.chainman)};
+    KernelNotifications notifications{Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings)};
+    const BlockManager::Options options{
+        .chainparams = Params(),
+        .prune_target = 800_MiB,
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+        .block_tree_db_params = DBParams{
+            .path = m_args.GetDataDirNet() / "policy-index",
+            .cache_bytes = 0,
+            .memory_only = true,
+        },
+    };
+    BlockManager blockman{*Assert(m_node.shutdown_signal), options};
+    LOCK(::cs_main);
+    Chainstate chain{nullptr, blockman, manager};
+    auto limits{chain.GetBlockPruneOptions()};
+    BOOST_CHECK_EQUAL(limits.chain_tip_height, -1);
+    BOOST_CHECK_EQUAL(limits.target_bytes, 0U);
+
+    const int threshold{static_cast<int>(Params().PruneAfterHeight())};
+    std::vector<CBlockIndex> blocks(threshold + 3);
+    for (int i = 0; i < static_cast<int>(blocks.size()); ++i) {
+        blocks[i].nHeight = i;
+        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
+    }
+    chain.m_chain.SetTip(blocks[threshold]);
+    limits = chain.GetBlockPruneOptions();
+    BOOST_CHECK_EQUAL(limits.target_bytes, 0U);
+    BOOST_CHECK_EQUAL(limits.last_prunable_height, threshold - MIN_BLOCKS_TO_KEEP);
+
+    chain.m_chain.SetTip(blocks[threshold + 1]);
+    auto* previous_header{manager.m_best_header};
+    const bool previous_ibd{manager.IsInitialBlockDownload()};
+    manager.m_cached_is_ibd.store(true, std::memory_order_relaxed);
+    manager.m_best_header = &blocks[threshold + 2];
+    limits = chain.GetBlockPruneOptions();
+    BOOST_CHECK_EQUAL(limits.target_bytes, 800_MiB);
+    BOOST_CHECK_EQUAL(limits.extra_space, 1'000'000U);
+    BOOST_CHECK_EQUAL(limits.last_prunable_height, threshold + 1 - MIN_BLOCKS_TO_KEEP);
+
+    manager.m_cached_is_ibd.store(false, std::memory_order_relaxed);
+    BOOST_CHECK_EQUAL(chain.GetBlockPruneOptions().extra_space, 0U);
+    manager.m_cached_is_ibd.store(true, std::memory_order_relaxed);
+    manager.m_best_header = nullptr;
+    BOOST_CHECK_EQUAL(chain.GetBlockPruneOptions().extra_space, 0U);
+    manager.m_best_header = &blocks[threshold];
+    BOOST_CHECK_EQUAL(chain.GetBlockPruneOptions().extra_space, 0U);
+    manager.m_best_header = previous_header;
+    manager.m_cached_is_ibd.store(previous_ibd, std::memory_order_relaxed);
+
+    // A historical chainstate splits the configured budget, with the floor
+    // applied afterward: 800 / 2 = 400 MiB is raised to 550 MiB.
+    auto& active{manager.ActiveChainstate()};
+    active.SetTargetBlockHash(uint256::ONE);
+    BOOST_CHECK_EQUAL(chain.GetBlockPruneOptions().target_bytes, 550_MiB);
+    active.SetTargetBlock(nullptr);
+
+    // Unvalidated snapshots protect earlier blocks even if that makes the
+    // safe interval empty. Validation of the snapshot removes this lower bound.
+    auto* base{manager.m_blockman.InsertBlockIndex(uint256::ONE)};
+    base->nHeight = threshold;
+    Chainstate snapshot{nullptr, blockman, manager, uint256::ONE};
+    snapshot.m_chain.SetTip(blocks[threshold + 1]);
+    limits = snapshot.GetBlockPruneOptions();
+    BOOST_CHECK_EQUAL(limits.first_prunable_height, threshold + 1);
+    BOOST_CHECK_GT(limits.first_prunable_height, limits.last_prunable_height);
+    snapshot.m_assumeutxo = Assumeutxo::VALIDATED;
+    BOOST_CHECK_EQUAL(snapshot.GetBlockPruneOptions().first_prunable_height, 0);
+}
 
 //! Basic tests for ChainstateManager.
 //!

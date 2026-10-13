@@ -7,6 +7,7 @@
 #include <arith_uint256.h>
 #include <chain.h>
 #include <consensus/params.h>
+#include <consensus/validation.h>
 #include <crypto/hex_base.h>
 #include <dbwrapper.h>
 #include <flatfile.h>
@@ -31,11 +32,12 @@
 #include <util/check.h>
 #include <util/expected.h>
 #include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <util/log.h>
 #include <util/obfuscation.h>
 #include <util/overflow.h>
-#include <util/result.h>
 #include <util/signalinterrupt.h>
+#include <util/result.h>
 #include <util/strencodings.h>
 #include <util/syserror.h>
 #include <util/time.h>
@@ -47,11 +49,9 @@
 #include <cstddef>
 #include <cstdio>
 #include <exception>
-#include <limits>
 #include <map>
 #include <optional>
 #include <ostream>
-#include <span>
 #include <stdexcept>
 #include <system_error>
 #include <unordered_map>
@@ -172,12 +172,22 @@ std::string CBlockFileInfo::ToString() const
 } // namespace kernel
 
 namespace node {
+
 /** The number of blocks to keep below the deepest prune lock.
  *  There is nothing special about this number. It is higher than what we
  *  expect to see in regular mainnet reorgs, but not so high that it would
  *  noticeably interfere with the pruning mechanism.
  * */
 static constexpr int PRUNE_LOCK_BUFFER{10};
+
+static bool FatalBlockStorageError(
+    kernel::Notifications& notifications,
+    BlockValidationState& state,
+    const bilingual_str& message)
+{
+    notifications.fatalError(message);
+    return state.Error(message.original);
+}
 
 bool CBlockIndexWorkComparator::operator()(const CBlockIndex* pa, const CBlockIndex* pb) const
 {
@@ -308,114 +318,124 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
     m_dirty_fileinfo.insert(fileNumber);
 }
 
-void BlockManager::FindFilesToPruneManual(
-    std::set<int>& setFilesToPrune,
-    int nManualPruneHeight,
-    const Chainstate& chain)
+BlockManager::PrunePlan BlockManager::PlanManualPrune(
+    const BlockPruneOptions& prune) const
 {
-    assert(IsPruneMode() && nManualPruneHeight > 0);
+    AssertLockHeld(::cs_main);
+    assert(IsPruneMode());
 
-    LOCK(::cs_main);
-    if (chain.m_chain.Height() < 0) {
-        return;
-    }
+    PrunePlan plan;
+    const bool valid_range{
+        prune.chain_tip_height >= 0 &&
+        prune.first_prunable_height >= 0 &&
+        prune.first_prunable_height <= prune.last_prunable_height};
 
-    const auto [min_block_to_prune, last_block_can_prune] = chain.GetPruneRange(nManualPruneHeight);
-
-    int count = 0;
-    for (int fileNumber = 0; fileNumber < this->MaxBlockfileNum(); fileNumber++) {
-        const auto& fileinfo = m_blockfile_info[fileNumber];
-        if (fileinfo.nSize == 0 || fileinfo.nHeightLast > (unsigned)last_block_can_prune || fileinfo.nHeightFirst < (unsigned)min_block_to_prune) {
-            continue;
+    if (valid_range) {
+        for (int file_number = 0; file_number < MaxBlockfileNum(); ++file_number) {
+            const auto& file_info{m_blockfile_info[file_number]};
+            if (file_info.nSize == 0 ||
+                file_info.nHeightLast > static_cast<unsigned>(prune.last_prunable_height) ||
+                file_info.nHeightFirst < static_cast<unsigned>(prune.first_prunable_height)) {
+                continue;
+            }
+            plan.files.insert(file_number);
+            plan.bytes += file_info.nSize + file_info.nUndoSize;
         }
-
-        PruneOneBlockFile(fileNumber);
-        setFilesToPrune.insert(fileNumber);
-        count++;
     }
-    LogInfo("[%s] Prune (Manual): prune_height=%d removed %d blk/rev pairs",
-        chain.GetRole(), last_block_can_prune, count);
+
+    LogInfo("[%s] Prune (Manual): prune_height=%d selected %d blk/rev pairs",
+            BlockfileTypeForHeight(prune.chain_tip_height),
+            prune.last_prunable_height,
+            plan.files.size());
+    return plan;
 }
 
-void BlockManager::FindFilesToPrune(
-    std::set<int>& setFilesToPrune,
-    int last_prune,
-    const Chainstate& chain,
-    ChainstateManager& chainman)
+BlockManager::PrunePlan BlockManager::PlanTargetPrune(
+    const BlockPruneOptions& prune) const
 {
-    LOCK(::cs_main);
-    // Compute `target` value with maximum size (in bytes) of blocks below the
-    // `last_prune` height which should be preserved and not pruned. The
-    // `target` value will be derived from the -prune preference provided by the
-    // user. If there is a historical chainstate being used to populate indexes
-    // and validate the snapshot, the target is divided by two so half of the
-    // block storage will be reserved for the historical chainstate, and the
-    // other half will be reserved for the most-work chainstate.
-    const int num_chainstates{chainman.HistoricalChainstate() ? 2 : 1};
-    const auto target = std::max(
-        MIN_DISK_SPACE_FOR_BLOCK_FILES, GetPruneTarget() / num_chainstates);
-    const uint64_t target_sync_height = chainman.m_best_header->nHeight;
+    AssertLockHeld(::cs_main);
 
-    if (chain.m_chain.Height() < 0 || target == 0) {
-        return;
-    }
-    if (static_cast<uint64_t>(chain.m_chain.Height()) <= chainman.GetParams().PruneAfterHeight()) {
-        return;
-    }
+    PrunePlan plan;
+    const uint64_t target{prune.target_bytes};
+    if (prune.chain_tip_height < 0 || target == 0) return plan;
 
-    const auto [min_block_to_prune, last_block_can_prune] = chain.GetPruneRange(last_prune);
+    const bool valid_range{
+        prune.first_prunable_height >= 0 &&
+        prune.first_prunable_height <= prune.last_prunable_height};
+    uint64_t current_usage{CalculateCurrentUsage()};
+    // Leave enough room for one more normal block and undo allocation before
+    // the next pruning check.
+    uint64_t buffer{BLOCKFILE_CHUNK_SIZE + UNDOFILE_CHUNK_SIZE};
 
-    uint64_t nCurrentUsage = CalculateCurrentUsage();
-    // We don't check to prune until after we've allocated new space for files
-    // So we should leave a buffer under our target to account for another allocation
-    // before the next pruning.
-    uint64_t nBuffer = BLOCKFILE_CHUNK_SIZE + UNDOFILE_CHUNK_SIZE;
-    uint64_t nBytesToPrune;
-    int count = 0;
+    if (current_usage + buffer >= target) {
+        buffer += prune.extra_space;
 
-    if (nCurrentUsage + nBuffer >= target) {
-        // On a prune event, the chainstate DB is flushed.
-        // To avoid excessive prune events negating the benefit of high dbcache
-        // values, we should not prune too rapidly.
-        // So when pruning in IBD, increase the buffer to avoid a re-prune too soon.
-        const auto chain_tip_height = chain.m_chain.Height();
-        if (chainman.IsInitialBlockDownload() && target_sync_height > (uint64_t)chain_tip_height) {
-            // Since this is only relevant during IBD, we assume blocks are at least 1 MB on average
-            static constexpr uint64_t average_block_size = 1000000;  /* 1 MB */
-            const uint64_t remaining_blocks = target_sync_height - chain_tip_height;
-            nBuffer += average_block_size * remaining_blocks;
-        }
+        for (int file_number = 0; file_number < MaxBlockfileNum(); ++file_number) {
+            const auto& file_info{m_blockfile_info[file_number]};
+            if (file_info.nSize == 0) continue;
+            if (current_usage + buffer < target) break;
 
-        for (int fileNumber = 0; fileNumber < this->MaxBlockfileNum(); fileNumber++) {
-            const auto& fileinfo = m_blockfile_info[fileNumber];
-            nBytesToPrune = fileinfo.nSize + fileinfo.nUndoSize;
-
-            if (fileinfo.nSize == 0) {
+            if (!valid_range ||
+                file_info.nHeightLast > static_cast<unsigned>(prune.last_prunable_height) ||
+                file_info.nHeightFirst < static_cast<unsigned>(prune.first_prunable_height)) {
                 continue;
             }
 
-            if (nCurrentUsage + nBuffer < target) { // are we below our target?
-                break;
-            }
-
-            // don't prune files that could have a block that's not within the allowable
-            // prune range for the chain being pruned.
-            if (fileinfo.nHeightLast > (unsigned)last_block_can_prune || fileinfo.nHeightFirst < (unsigned)min_block_to_prune) {
-                continue;
-            }
-
-            PruneOneBlockFile(fileNumber);
-            // Queue up the files for removal
-            setFilesToPrune.insert(fileNumber);
-            nCurrentUsage -= nBytesToPrune;
-            count++;
+            const uint64_t file_bytes{file_info.nSize + file_info.nUndoSize};
+            plan.files.insert(file_number);
+            plan.bytes += file_bytes;
+            current_usage -= file_bytes;
         }
     }
 
-    LogDebug(BCLog::PRUNE, "[%s] target=%dMiB actual=%dMiB diff=%dMiB min_height=%d max_prune_height=%d removed %d blk/rev pairs\n",
-             chain.GetRole(), target / 1_MiB, nCurrentUsage / 1_MiB,
-             (int64_t(target) - int64_t(nCurrentUsage)) / int64_t(1_MiB),
-             min_block_to_prune, last_block_can_prune, count);
+    LogDebug(BCLog::PRUNE,
+             "[%s] Prune: target=%dMiB actual=%dMiB diff=%dMiB min_height=%d max_prune_height=%d selected %d blk/rev pairs\n",
+             BlockfileTypeForHeight(prune.chain_tip_height), target / 1_MiB,
+             current_usage / 1_MiB,
+             (int64_t(target) - int64_t(current_usage)) / int64_t(1_MiB),
+             prune.first_prunable_height, prune.last_prunable_height,
+             plan.files.size());
+    return plan;
+}
+
+BlockPruneOptions BlockManager::ApplyPruneLocks(
+    BlockPruneOptions prune) const
+{
+    AssertLockHeld(::cs_main);
+
+    // Calculate the storage-owned lock ceiling from the chain tip before
+    // combining it with validation's safety ceiling. Apart from preserving the
+    // original decision order, this reports a limiting lock even when
+    // MIN_BLOCKS_TO_KEEP is ultimately the tighter constraint.
+    int lock_ceiling{prune.chain_tip_height};
+    std::optional<std::string> limiting_lock;
+    for (const auto& [name, prune_lock] : m_prune_locks) {
+        if (prune_lock.height_first == std::numeric_limits<int>::max()) continue;
+
+        // Remove the buffer and one additional block to obtain the highest
+        // height outside the protected range.
+        const int lock_height{prune_lock.height_first - PRUNE_LOCK_BUFFER - 1};
+        lock_ceiling = std::max(1, std::min(lock_ceiling, lock_height));
+        if (lock_ceiling == lock_height) {
+            limiting_lock = name;
+        }
+    }
+    prune.last_prunable_height =
+        std::min(prune.last_prunable_height, lock_ceiling);
+
+    if (limiting_lock) {
+        LogDebug(BCLog::PRUNE, "%s limited pruning to height %d\n",
+                 *limiting_lock, lock_ceiling);
+    }
+    return prune;
+}
+
+void BlockManager::ApplyPrunePlan(const PrunePlan& plan)
+{
+    AssertLockHeld(::cs_main);
+    for (const int file_number : plan.files) {
+        PruneOneBlockFile(file_number);
+    }
 }
 
 void BlockManager::UpdatePruneLock(const std::string& name, const PruneLockInfo& lock_info) {
@@ -429,35 +449,83 @@ bool BlockManager::DeletePruneLock(const std::string& name)
     return m_prune_locks.erase(name) > 0;
 }
 
-int BlockManager::GetLastPrunableHeight(int last_prune) const
+util::Expected<BlockStorageFlushResult, BlockStorageFlushError> BlockManager::FlushBlockStorage(
+    const BlockStorageFlushRequest& request)
 {
     AssertLockHeld(::cs_main);
-    std::optional<std::string> limiting_lock; // prune lock that actually was the limiting factor, only used for logging
+    assert(!request.manual_prune_height || *request.manual_prune_height > 0);
 
-    for (const auto& prune_lock : m_prune_locks) {
-        if (prune_lock.second.height_first == std::numeric_limits<int>::max()) continue;
-        // Remove the buffer and one additional block here to get actual height that is outside of the buffer
-        const int lock_height{prune_lock.second.height_first - PRUNE_LOCK_BUFFER - 1};
-        last_prune = std::max(1, std::min(last_prune, lock_height));
-        if (last_prune == lock_height) {
-            limiting_lock = prune_lock.first;
+    PrunePlan plan;
+    if (IsPruneMode() && (m_check_for_pruning || request.manual_prune_height) && m_blockfiles_indexed) {
+        BlockPruneOptions prune{ApplyPruneLocks(request.prune)};
+        if (request.manual_prune_height) {
+            LOG_TIME_MILLIS_WITH_CATEGORY("plan files to prune (manual)", BCLog::BENCH);
+            prune.last_prunable_height =
+                std::min(prune.last_prunable_height, *request.manual_prune_height);
+            plan = PlanManualPrune(prune);
+        } else {
+            LOG_TIME_MILLIS_WITH_CATEGORY("plan files to prune", BCLog::BENCH);
+            plan = PlanTargetPrune(prune);
+            m_check_for_pruning = false;
         }
     }
 
-    if (limiting_lock) {
-        LogDebug(BCLog::PRUNE, "%s limited pruning to height %d\n", limiting_lock.value(), last_prune);
+    const bool should_write{request.write_block_index || !plan.files.empty()};
+    if (!should_write) return BlockStorageFlushResult{};
+
+    if (!CheckDiskSpace(m_opts.blocks_dir)) {
+        return util::Unexpected{BlockStorageFlushError::OUT_OF_DISK_SPACE};
     }
-    return last_prune;
+
+    // File selection is deliberately side-effect-free. From this point on,
+    // preserve the established crash protocol: mark availability metadata,
+    // persist it, and only then unlink physical files.
+    ApplyPrunePlan(plan);
+    if (!plan.files.empty() && !m_have_pruned) {
+        m_block_tree_db->WriteFlag("prunedblockfiles", true);
+        m_have_pruned = true;
+    }
+
+    {
+        LOG_TIME_MILLIS_WITH_CATEGORY("write block and undo data to disk", BCLog::BENCH);
+        // The file flush reports the specific error through notifications.
+        // Do not persist the index or delete files when it fails.
+        if (!FlushCurrentBlockFile(request.prune.chain_tip_height)) {
+            return util::Unexpected{BlockStorageFlushError::FLUSH_FAILED};
+        }
+    }
+
+    {
+        LOG_TIME_MILLIS_WITH_CATEGORY("write block index to disk", BCLog::BENCH);
+        WriteBlockIndexDB();
+    }
+
+    if (!plan.files.empty()) {
+        LOG_TIME_MILLIS_WITH_CATEGORY("unlink pruned files", BCLog::BENCH);
+        UnlinkPrunedFiles(plan.files);
+    }
+
+    return BlockStorageFlushResult{
+        .wrote_block_index = true,
+        .pruned_files = std::move(plan.files),
+        .pruned_bytes = plan.bytes,
+    };
 }
 
-void BlockManager::MovePruneLocksBack(int max_height_first)
+void BlockManager::RequestPrune()
 {
     AssertLockHeld(::cs_main);
-    for (auto& prune_lock : m_prune_locks) {
-        if (prune_lock.second.height_first <= max_height_first) continue;
+    m_check_for_pruning = true;
+}
 
-        prune_lock.second.height_first = max_height_first;
-        LogDebug(BCLog::PRUNE, "%s prune lock moved back to %d\n", prune_lock.first, max_height_first);
+void BlockManager::RewindPruneLocks(const int max_height_first)
+{
+    AssertLockHeld(::cs_main);
+    for (auto& [name, prune_lock] : m_prune_locks) {
+        if (prune_lock.height_first <= max_height_first) continue;
+
+        prune_lock.height_first = max_height_first;
+        LogDebug(BCLog::PRUNE, "%s prune lock moved back to %d\n", name, max_height_first);
     }
 }
 
@@ -826,7 +894,7 @@ bool BlockManager::FlushBlockFile(int blockfile_num, bool fFinalize, bool finali
     return success;
 }
 
-BlockfileType BlockManager::BlockfileTypeForHeight(int height)
+BlockfileType BlockManager::BlockfileTypeForHeight(int height) const
 {
     if (!m_snapshot_height) {
         return BlockfileType::NORMAL;
@@ -834,7 +902,7 @@ BlockfileType BlockManager::BlockfileTypeForHeight(int height)
     return (height >= *m_snapshot_height) ? BlockfileType::ASSUMED : BlockfileType::NORMAL;
 }
 
-bool BlockManager::FlushChainstateBlockFile(int tip_height)
+bool BlockManager::FlushCurrentBlockFile(int tip_height)
 {
     AssertLockHeld(::cs_main);
     auto& cursor = m_blockfile_cursors[BlockfileTypeForHeight(tip_height)];
@@ -848,32 +916,7 @@ bool BlockManager::FlushChainstateBlockFile(int tip_height)
     return true;
 }
 
-bool BlockManager::WriteBlockStorage(int tip_height, const std::set<int>& files_to_prune)
-{
-    AssertLockHeld(::cs_main);
-    {
-        LOG_TIME_MILLIS_WITH_CATEGORY("write block and undo data to disk", BCLog::BENCH);
-
-        // First make sure all block and undo data is flushed to disk.
-        if (!FlushChainstateBlockFile(tip_height)) return false;
-    }
-
-    // Then update all block file information (which may refer to block and undo files).
-    {
-        LOG_TIME_MILLIS_WITH_CATEGORY("write block index to disk", BCLog::BENCH);
-
-        WriteBlockIndexDB();
-    }
-    // Finally remove any pruned files
-    if (!files_to_prune.empty()) {
-        LOG_TIME_MILLIS_WITH_CATEGORY("unlink pruned files", BCLog::BENCH);
-
-        UnlinkPrunedFiles(files_to_prune);
-    }
-    return true;
-}
-
-uint64_t BlockManager::CalculateCurrentUsage()
+uint64_t BlockManager::CalculateCurrentUsage() const
 {
     AssertLockHeld(::cs_main);
     uint64_t retval = 0;
@@ -1034,7 +1077,7 @@ bool BlockManager::FindUndoPos(BlockValidationState& state, int nFile, FlatFileP
     bool out_of_space;
     size_t bytes_allocated = m_undo_file_seq.Allocate(pos, nAddSize, out_of_space);
     if (out_of_space) {
-        return FatalError(m_opts.notifications, state, _("Disk space is too low!"));
+        return FatalBlockStorageError(m_opts.notifications, state, _("Disk space is too low!"));
     }
     if (bytes_allocated != 0 && IsPruneMode()) {
         m_check_for_pruning = true;
@@ -1062,7 +1105,7 @@ bool BlockManager::WriteBlockUndo(const CBlockUndo& blockundo, BlockValidationSt
         AutoFile file{OpenUndoFile(pos)};
         if (file.IsNull()) {
             LogError("OpenUndoFile failed for %s while writing block undo", pos.ToString());
-            return FatalError(m_opts.notifications, state, _("Failed to write undo data."));
+            return FatalBlockStorageError(m_opts.notifications, state, _("Failed to write undo data."));
         }
         {
             BufferedWriter fileout{file};
@@ -1083,7 +1126,7 @@ bool BlockManager::WriteBlockUndo(const CBlockUndo& blockundo, BlockValidationSt
         // Make sure that the file is closed before we call `FlushUndoFile`.
         if (file.fclose() != 0) {
             LogError("Failed to close block undo file %s: %s", pos.ToString(), SysErrorString(errno));
-            return FatalError(m_opts.notifications, state, _("Failed to close block undo file."));
+            return FatalBlockStorageError(m_opts.notifications, state, _("Failed to close block undo file."));
         }
 
         // rev files are written in block height order, whereas blk files are written as blocks come in (often out of order)

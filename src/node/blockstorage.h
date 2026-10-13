@@ -184,6 +184,51 @@ enum class ReadRawError {
 };
 
 /**
+ * Precomputed limits for block-storage pruning.
+ *
+ * Validation supplies a range that already enforces snapshot and
+ * MIN_BLOCKS_TO_KEEP safety, and calculates the target and extra headroom.
+ * Storage applies its prune locks and selects whole files within that range.
+ * An inverted range is a valid no-op; negative bounds select no files.
+ *
+ * This is a trusted internal integration type, not a public pruning API.
+ * Construct and consume it under cs_main so its limits cannot become stale.
+ */
+struct BlockPruneOptions {
+    /** Used for prune locks and flushing the current block/undo files. -1 means no tip. */
+    int chain_tip_height{-1};
+    int first_prunable_height{0};
+    int last_prunable_height{0};
+    /** Zero disables automatic pruning; manual pruning does not use this target. */
+    uint64_t target_bytes{0};
+    /** Additional headroom used only after the ordinary allocation threshold is reached. */
+    uint64_t extra_space{0};
+};
+
+/** Inputs for one ordered block-storage flush operation. */
+struct BlockStorageFlushRequest {
+    BlockPruneOptions prune;
+    /** Persist block metadata even if no files are selected for pruning. */
+    bool write_block_index{false};
+    /** A height requests manual pruning; nullopt selects target pruning. */
+    std::optional<int> manual_prune_height;
+};
+
+struct BlockStorageFlushResult {
+    bool wrote_block_index{false};
+    /** Logically pruned files and their recorded sizes, not confirmed disk reclamation. */
+    std::set<int> pruned_files;
+    uint64_t pruned_bytes{0};
+
+    [[nodiscard]] bool Pruned() const { return !pruned_files.empty(); }
+};
+
+enum class BlockStorageFlushError {
+    OUT_OF_DISK_SPACE,
+    FLUSH_FAILED,
+};
+
+/**
  * Maintains a tree of blocks (stored in `m_block_index`) which is consulted
  * to determine where the most-work tip is.
  *
@@ -196,6 +241,11 @@ class BlockManager
     friend ChainstateManager;
 
 private:
+    struct PrunePlan {
+        std::set<int> files;
+        uint64_t bytes{0};
+    };
+
     const CChainParams& GetParams() const { return m_opts.chainparams; }
     const Consensus::Params& GetConsensus() const { return m_opts.chainparams.GetConsensus(); }
     /**
@@ -222,38 +272,30 @@ private:
      * separator fields (STORAGE_HEADER_BYTES).
      */
     [[nodiscard]] FlatFilePos FindNextBlockPos(unsigned int nAddSize, unsigned int nHeight, uint64_t nTime) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool FlushCurrentBlockFile(int tip_height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     [[nodiscard]] bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     AutoFile OpenUndoFile(const FlatFilePos& pos, bool fReadOnly = false) const;
 
-    /* Calculate the block/rev files to delete based on height specified by user with RPC command pruneblockchain */
-    void FindFilesToPruneManual(
-        std::set<int>& setFilesToPrune,
-        int nManualPruneHeight,
-        const Chainstate& chain);
+    /** Plan files to delete for a manual pruneblockchain request. */
+    [[nodiscard]] PrunePlan PlanManualPrune(
+        const BlockPruneOptions& prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
-     * Prune block and undo files (blk???.dat and rev???.dat) so that the disk space used is less than a user-defined target.
-     * The user sets the target (in MB) on the command line or in config file.  This will be run on startup and whenever new
-     * space is allocated in a block or undo file, staying below the target. Changing back to unpruned requires a reindex
-     * (which in this case means the blockchain must be re-downloaded.)
-     *
-     * Pruning functions are called from FlushStateToDisk when the m_check_for_pruning flag has been set.
-     * Block and undo files are deleted in lock-step (when blk00003.dat is deleted, so is rev00003.dat.)
-     * Pruning cannot take place until the longest chain is at least a certain length (CChainParams::nPruneAfterHeight).
-     * Pruning will never delete a block within a defined distance (currently 288) from the active chain's tip.
-     * The block index is updated by unsetting HAVE_DATA and HAVE_UNDO for any blocks that were stored in the deleted files.
-     * A db flag records the fact that at least some block files have been pruned.
-     *
-     * @param[out]   setFilesToPrune   The set of file indices that can be unlinked will be returned
-     * @param        last_prune        The last height we're able to prune, according to the prune locks
+     * Select whole block/undo file pairs within the supplied range until usage
+     * plus allocation headroom is below the supplied target. Extra headroom
+     * affects how much to prune, not whether pruning is triggered.
+     * Does not mutate file or block-index metadata.
      */
-    void FindFilesToPrune(
-        std::set<int>& setFilesToPrune,
-        int last_prune,
-        const Chainstate& chain,
-        ChainstateManager& chainman);
+    [[nodiscard]] PrunePlan PlanTargetPrune(
+        const BlockPruneOptions& prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Apply storage-owned prune locks to a validation-supplied range. */
+    [[nodiscard]] BlockPruneOptions ApplyPruneLocks(
+        BlockPruneOptions prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Mark every block-index entry contained in a planned file as pruned. */
+    void ApplyPrunePlan(const PrunePlan& plan) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Since assumedvalid chainstates may be syncing a range of the chain that is very
     //! far away from the normal/background validation process, we should segment blockfiles
@@ -283,7 +325,7 @@ private:
      *  block/undo files that should be deleted.  Set on startup
      *  or if we allocate more file space when we're in prune mode
      */
-    bool m_check_for_pruning = false;
+    bool m_check_for_pruning GUARDED_BY(::cs_main) = false;
 
     const bool m_prune_mode;
 
@@ -297,7 +339,7 @@ private:
      */
     std::unordered_map<std::string, PruneLockInfo> m_prune_locks GUARDED_BY(::cs_main);
 
-    BlockfileType BlockfileTypeForHeight(int height);
+    BlockfileType BlockfileTypeForHeight(int height) const;
 
     const kernel::BlockManagerOpts m_opts;
 
@@ -357,12 +399,6 @@ public:
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
 
     void WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    /**
-     * Flush the block and undo file used for `tip_height`, write the block
-     * index, then delete `files_to_prune`. Returns false, without writing the
-     * index or deleting files, if the flush fails.
-     */
-    [[nodiscard]] bool WriteBlockStorage(int tip_height, const std::set<int>& files_to_prune) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
@@ -374,6 +410,7 @@ public:
     void ScanAndUnlinkAlreadyPrunedFiles() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     CBlockIndex* AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     /** Create a new block index entry for a given block hash */
     CBlockIndex* InsertBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
@@ -414,10 +451,24 @@ public:
     [[nodiscard]] uint64_t GetPruneTarget() const { return m_opts.prune_target; }
     static constexpr auto PRUNE_TARGET_MANUAL{std::numeric_limits<uint64_t>::max()};
 
+    /**
+     * Run the ordered storage write path and, when requested, prune. Selection
+     * does not mutate metadata; execution marks metadata, persists it, and only then
+     * unlinks whole blk/rev file pairs.
+     */
+    [[nodiscard]] util::Expected<BlockStorageFlushResult, BlockStorageFlushError> FlushBlockStorage(
+        const BlockStorageFlushRequest& request) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Request a target-pruning check during the next storage flush. */
+    void RequestPrune() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Move storage-owned prune locks backward after a reorganization. */
+    void RewindPruneLocks(int max_height_first) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     [[nodiscard]] bool LoadingBlocks() const { return m_importing || !m_blockfiles_indexed; }
 
     /** Calculate the amount of disk space the block & undo files currently use */
-    uint64_t CalculateCurrentUsage() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    uint64_t CalculateCurrentUsage() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Check if all blocks in the [upper_block, lower_block] range have data available as
     //! defined by the status mask.
@@ -465,12 +516,6 @@ public:
     //! Delete a prune lock identified by its name. Returns true if the lock existed.
     bool DeletePruneLock(const std::string& name) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    //! Return the last height that can be pruned, limited by `last_prune` and the prune locks.
-    int GetLastPrunableHeight(int last_prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-
-    //! Move prune locks that begin above `max_height_first` back to it.
-    void MovePruneLocksBack(int max_height_first) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-
     /** Open a block file (blk?????.dat) */
     AutoFile OpenBlockFile(const FlatFilePos& pos, bool fReadOnly) const;
 
@@ -494,6 +539,7 @@ public:
 
 // Calls ActivateBestChain() even if no blocks are imported.
 void ImportBlocks(ChainstateManager& chainman, std::span<const fs::path> import_paths);
+
 } // namespace node
 
 #endif // BITCOIN_NODE_BLOCKSTORAGE_H
