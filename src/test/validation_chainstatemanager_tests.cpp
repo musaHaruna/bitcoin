@@ -510,10 +510,16 @@ struct SnapshotTestSetup : TestChain100Setup {
             LOCK(::cs_main);
             chainman.ResetChainstates();
             BOOST_CHECK_EQUAL(chainman.m_chainstates.size(), 0);
+            const fs::path datadir{chainman.m_options.datadir};
+
+            // Both managers borrow notifications through their options. Destroy
+            // them before replacing the notification owner.
+            m_node.chainman.reset();
+            m_node.blockman.reset();
             m_node.notifications = std::make_unique<KernelNotifications>(Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
             const ChainstateManager::Options chainman_opts{
                 .chainparams = ::Params(),
-                .datadir = chainman.m_options.datadir,
+                .datadir = datadir,
                 .notifications = *m_node.notifications,
                 .signals = m_node.validation_signals.get(),
             };
@@ -522,15 +528,15 @@ struct SnapshotTestSetup : TestChain100Setup {
                 .blocks_dir = m_args.GetBlocksDirPath(),
                 .notifications = chainman_opts.notifications,
                 .block_tree_db_params = DBParams{
-                    .path = chainman.m_options.datadir / "blocks" / "index",
+                    .path = datadir / "blocks" / "index",
                     .cache_bytes = m_kernel_cache_sizes.block_tree_db,
                     .memory_only = m_block_tree_db_in_memory,
                 },
             };
-            // For robustness, ensure the old manager is destroyed before creating a
-            // new one.
-            m_node.chainman.reset();
-            m_node.chainman = std::make_unique<ChainstateManager>(*Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+            auto blockman{std::make_unique<BlockManager>(*Assert(m_node.shutdown_signal), blockman_opts)};
+            auto new_chainman{std::make_unique<ChainstateManager>(*Assert(m_node.shutdown_signal), chainman_opts, *blockman)};
+            m_node.blockman = std::move(blockman);
+            m_node.chainman = std::move(new_chainman);
             CreateBlockTemplateManager();
         }
         return *Assert(m_node.chainman);

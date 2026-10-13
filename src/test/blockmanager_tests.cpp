@@ -64,7 +64,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_scan_unlink_already_pruned_files, TestChain
 {
     // Cap last block file size, and mine new block in a new block file.
     auto& chainman{*Assert(m_node.chainman)};
-    auto& blockman{chainman.m_blockman};
+    auto& blockman{*Assert(m_node.blockman)};
     const CBlockIndex* old_tip{WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChain().Tip())};
     WITH_LOCK(chainman.GetMutex(), blockman.GetBlockFileInfo(old_tip->GetBlockPos().nFile)->nSize = MAX_BLOCKFILE_SIZE);
     CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
@@ -106,7 +106,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_availability, TestChain100Setup)
     // The goal of the function is to return the first not pruned block in the range [upper_block, lower_block].
     LOCK(::cs_main);
     auto& chainman = m_node.chainman;
-    auto& blockman = chainman->m_blockman;
+    auto& blockman = *Assert(m_node.blockman);
     const CBlockIndex& tip = *chainman->ActiveTip();
 
     // Function to prune all blocks from 'last_pruned_block' down to the genesis block
@@ -158,7 +158,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_part, TestChain100Setup)
 {
     LOCK(::cs_main);
     auto& chainman{m_node.chainman};
-    auto& blockman{chainman->m_blockman};
+    auto& blockman{*Assert(m_node.blockman)};
     const CBlockIndex& tip{*chainman->ActiveTip()};
     const FlatFilePos tip_block_pos{tip.GetBlockPos()};
 
@@ -186,7 +186,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_block_data_part_error, TestChain100Setup)
 {
     LOCK(::cs_main);
     auto& chainman{m_node.chainman};
-    auto& blockman{chainman->m_blockman};
+    auto& blockman{*Assert(m_node.blockman)};
     const CBlockIndex& tip{*chainman->ActiveTip()};
     const FlatFilePos tip_block_pos{tip.GetBlockPos()};
 
@@ -229,7 +229,7 @@ BOOST_FIXTURE_TEST_CASE(blockmanager_readblock_hash_mismatch, TestingSetup)
 
     ASSERT_DEBUG_LOG("GetHash() doesn't match index");
     CBlock block;
-    BOOST_CHECK(!m_node.chainman->m_blockman.ReadBlock(block, index));
+    BOOST_CHECK(!Assert(m_node.blockman)->ReadBlock(block, index));
 }
 
 BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
@@ -695,8 +695,7 @@ BOOST_AUTO_TEST_CASE(blockmanager_prune_lock_rewind)
 BOOST_FIXTURE_TEST_CASE(prune_lock_update_and_delete, TestingSetup)
 {
     LOCK(::cs_main);
-    auto& chainman{*Assert(m_node.chainman)};
-    auto& blockman{chainman.m_blockman};
+    auto& blockman{*Assert(m_node.blockman)};
 
     // Create a prune lock
     blockman.UpdatePruneLock("test_lock", node::PruneLockInfo{.height_first = 100});

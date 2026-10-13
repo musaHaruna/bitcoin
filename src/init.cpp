@@ -426,6 +426,7 @@ void Shutdown(NodeContext& node)
     node.block_template_manager.reset();
     node.mempool.reset();
     node.chainman.reset();
+    node.blockman.reset();
     node.validation_signals.reset();
     node.scheduler.reset();
     node.ecc_context.reset();
@@ -1401,8 +1402,9 @@ static ChainstateLoadResult InitAndLoadChainstate(
     // This function may be called twice, so any dirty state must be reset.
     node.notifications->setChainstateLoaded(false); // Drop state, such as a cached tip block
     node.block_template_manager.reset();
+    node.chainman.reset();
+    node.blockman.reset(); // Drop state, such as an initialized block tree database
     node.mempool.reset();
-    node.chainman.reset(); // Drop state, such as an initialized m_block_tree_db
 
     const CChainParams& chainparams = Params();
 
@@ -1440,12 +1442,16 @@ static ChainstateLoadResult InitAndLoadChainstate(
     };
     Assert(ApplyArgsManOptions(args, blockman_opts)); // no error can happen, already checked in AppInitParameterInteraction
 
-    // Creating the chainstate manager internally creates a BlockManager, opens
-    // the blocks tree db, and wipes existing block files in case of a reindex.
-    // The coinsdb is opened at a later point on LoadChainstate.
+    // Create block storage before validation. This opens the block tree database
+    // and wipes existing block files in case of a reindex. The coins database is
+    // opened later by LoadChainstate().
+    Assert(!node.blockman); // Was reset above
     Assert(!node.chainman); // Was reset above
     try {
-        node.chainman = std::make_unique<ChainstateManager>(*Assert(node.shutdown_signal), chainman_opts, blockman_opts);
+        auto blockman{std::make_unique<BlockManager>(*Assert(node.shutdown_signal), blockman_opts)};
+        auto chainman{std::make_unique<ChainstateManager>(*Assert(node.shutdown_signal), chainman_opts, *blockman)};
+        node.blockman = std::move(blockman);
+        node.chainman = std::move(chainman);
     } catch (dbwrapper_error& e) {
         LogError("%s", e.what());
         return {ChainstateLoadStatus::FAILURE, _("Error opening block database")};
@@ -1459,7 +1465,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
     // dependency between validation and index/base, since the latter is not in
     // libbitcoinkernel.
     chainman.snapshot_download_completed = [&node]() {
-        if (!node.chainman->m_blockman.IsPruneMode()) {
+        if (!Assert(node.blockman)->IsPruneMode()) {
             LogInfo("[snapshot] re-enabling NODE_NETWORK services");
             node.connman->AddLocalServices(NODE_NETWORK);
         }
@@ -1478,7 +1484,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
     node::ChainstateLoadOptions options;
     options.mempool = Assert(node.mempool.get());
     options.wipe_chainstate_db = do_reindex || do_reindex_chainstate;
-    options.prune = chainman.m_blockman.IsPruneMode();
+    options.prune = Assert(node.blockman)->IsPruneMode();
     options.check_blocks = args.GetIntArg("-checkblocks", DEFAULT_CHECKBLOCKS);
     options.check_level = args.GetIntArg("-checklevel", DEFAULT_CHECKLEVEL);
     options.require_full_verification = args.IsArgSet("-checkblocks") || args.IsArgSet("-checklevel");
@@ -1499,7 +1505,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
     auto [status, error] = catch_exceptions([&] { return LoadChainstate(chainman, cache_sizes, options); });
     if (status == node::ChainstateLoadStatus::SUCCESS) {
         uiInterface.InitMessage(_("Verifying blocks…"));
-        if (chainman.m_blockman.m_have_pruned && options.check_blocks > MIN_BLOCKS_TO_KEEP) {
+        if (Assert(node.blockman)->m_have_pruned && options.check_blocks > MIN_BLOCKS_TO_KEEP) {
             LogWarning("pruned datadir may not have more than %d blocks; only checking available blocks\n",
                        MIN_BLOCKS_TO_KEEP);
         }

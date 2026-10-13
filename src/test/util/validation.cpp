@@ -124,6 +124,7 @@ std::vector<std::pair<COutPoint, CAmount>> ResetChainmanAndMempool(TestingSetup&
     Assert(error.empty());
 
     setup.m_node.chainman.reset();
+    setup.m_node.blockman.reset();
     setup.m_make_chainman();
     setup.LoadVerifyActivateChainstate();
     setup.CreateBlockTemplateManager();

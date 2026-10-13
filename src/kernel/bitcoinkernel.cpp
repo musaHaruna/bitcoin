@@ -478,11 +478,12 @@ struct ChainstateManagerOptions {
 };
 
 struct ChainMan {
-    std::unique_ptr<ChainstateManager> m_chainman;
     std::shared_ptr<const Context> m_context;
+    std::unique_ptr<node::BlockManager> m_blockman;
+    std::unique_ptr<ChainstateManager> m_chainman;
 
-    ChainMan(std::unique_ptr<ChainstateManager> chainman, std::shared_ptr<const Context> context)
-        : m_chainman(std::move(chainman)), m_context(std::move(context)) {}
+    ChainMan(std::unique_ptr<node::BlockManager> blockman, std::unique_ptr<ChainstateManager> chainman, std::shared_ptr<const Context> context)
+        : m_context(std::move(context)), m_blockman(std::move(blockman)), m_chainman(std::move(chainman)) {}
 };
 
 struct UserDataDeleter {
@@ -1269,10 +1270,12 @@ btck_ChainstateManager* btck_chainstate_manager_create(
     const btck_ChainstateManagerOptions* chainman_opts)
 {
     auto& opts{btck_ChainstateManagerOptions::get(chainman_opts)};
+    std::unique_ptr<node::BlockManager> blockman;
     std::unique_ptr<ChainstateManager> chainman;
     try {
         LOCK(opts.m_mutex);
-        chainman = std::make_unique<ChainstateManager>(*opts.m_context->m_interrupt, opts.m_chainman_options, opts.m_blockman_options);
+        blockman = std::make_unique<node::BlockManager>(*opts.m_context->m_interrupt, opts.m_blockman_options);
+        chainman = std::make_unique<ChainstateManager>(*opts.m_context->m_interrupt, opts.m_chainman_options, *blockman);
     } catch (const std::exception& e) {
         LogError("Failed to create chainstate manager: %s", e.what());
         return nullptr;
@@ -1301,13 +1304,13 @@ btck_ChainstateManager* btck_chainstate_manager_create(
         return nullptr;
     }
 
-    return btck_ChainstateManager::create(std::move(chainman), opts.m_context);
+    return btck_ChainstateManager::create(std::move(blockman), std::move(chainman), opts.m_context);
 }
 
 const btck_BlockTreeEntry* btck_chainstate_manager_get_block_tree_entry_by_hash(const btck_ChainstateManager* chainman, const btck_BlockHash* block_hash)
 {
     auto block_index = WITH_LOCK(btck_ChainstateManager::get(chainman).m_chainman->GetMutex(),
-                                 return btck_ChainstateManager::get(chainman).m_chainman->m_blockman.LookupBlockIndex(btck_BlockHash::get(block_hash)));
+                                 return btck_ChainstateManager::get(chainman).m_blockman->LookupBlockIndex(btck_BlockHash::get(block_hash)));
     if (!block_index) {
         LogDebug(BCLog::KERNEL, "A block with the given hash is not indexed.");
         return nullptr;
@@ -1432,7 +1435,7 @@ void btck_block_destroy(btck_Block* block)
 btck_Block* btck_block_read(const btck_ChainstateManager* chainman, const btck_BlockTreeEntry* entry)
 {
     auto block{std::make_shared<CBlock>()};
-    if (!btck_ChainstateManager::get(chainman).m_chainman->m_blockman.ReadBlock(*block, btck_BlockTreeEntry::get(entry))) {
+    if (!btck_ChainstateManager::get(chainman).m_blockman->ReadBlock(*block, btck_BlockTreeEntry::get(entry))) {
         LogError("Failed to read block.");
         return nullptr;
     }
@@ -1491,7 +1494,7 @@ btck_BlockSpentOutputs* btck_block_spent_outputs_read(const btck_ChainstateManag
         LogDebug(BCLog::KERNEL, "The genesis block does not have any spent outputs.");
         return btck_BlockSpentOutputs::create(block_undo);
     }
-    if (!btck_ChainstateManager::get(chainman).m_chainman->m_blockman.ReadBlockUndo(*block_undo, btck_BlockTreeEntry::get(entry))) {
+    if (!btck_ChainstateManager::get(chainman).m_blockman->ReadBlockUndo(*block_undo, btck_BlockTreeEntry::get(entry))) {
         LogError("Failed to read block spent outputs data.");
         return nullptr;
     }

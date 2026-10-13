@@ -301,6 +301,7 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
     m_node.notifications = std::make_unique<KernelNotifications>(Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
 
     m_make_chainman = [this, &chainparams, opts] {
+        Assert(!m_node.blockman);
         Assert(!m_node.chainman);
         ChainstateManager::Options chainman_opts{
             .chainparams = chainparams,
@@ -328,7 +329,10 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
                 .wipe_data = m_args.GetBoolArg("-reindex", false),
             },
         };
-        m_node.chainman = std::make_unique<ChainstateManager>(*Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        auto blockman{std::make_unique<BlockManager>(*Assert(m_node.shutdown_signal), blockman_opts)};
+        auto chainman{std::make_unique<ChainstateManager>(*Assert(m_node.shutdown_signal), chainman_opts, *blockman)};
+        m_node.blockman = std::move(blockman);
+        m_node.chainman = std::move(chainman);
     };
     m_make_chainman();
     CreateBlockTemplateManager();
@@ -356,6 +360,7 @@ ChainTestingSetup::~ChainTestingSetup()
     m_node.mempool.reset();
     Assert(!m_node.fee_estimator_man); // Each test must create a local object, if they wish to use the fee_estimator_man
     m_node.chainman.reset();
+    m_node.blockman.reset();
     m_node.validation_signals.reset();
     m_node.scheduler.reset();
 }
