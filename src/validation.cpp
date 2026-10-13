@@ -1982,7 +1982,7 @@ void Chainstate::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationSta
     AssertLockHeld(cs_main);
     if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
         pindex->nStatus |= BLOCK_FAILED_VALID;
-        m_blockman.m_dirty_blockindex.insert(pindex);
+        m_blockman.MarkBlockIndexDirty(*pindex);
         setBlockIndexCandidates.erase(pindex);
         InvalidChainFound(pindex);
     }
@@ -2638,7 +2638,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     if (!pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
         pindex->RaiseValidity(BLOCK_VALID_SCRIPTS);
-        m_blockman.m_dirty_blockindex.insert(pindex);
+        m_blockman.MarkBlockIndexDirty(*pindex);
     }
 
     // add this block to the view's block chain
@@ -3540,7 +3540,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
         // are no blocks that meet the "have data and are not invalid per
         // nStatus" criteria for inclusion in setBlockIndexCandidates).
         disconnected_tip->nStatus |= BLOCK_FAILED_VALID;
-        m_blockman.m_dirty_blockindex.insert(disconnected_tip);
+        m_blockman.MarkBlockIndexDirty(*disconnected_tip);
         setBlockIndexCandidates.erase(disconnected_tip);
         setBlockIndexCandidates.insert(new_tip);
 
@@ -3560,7 +3560,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
             if (candidate->GetAncestor(disconnected_tip->nHeight) == disconnected_tip) {
                 // Children of failed blocks are marked as BLOCK_FAILED_VALID.
                 candidate->nStatus |= BLOCK_FAILED_VALID;
-                m_blockman.m_dirty_blockindex.insert(candidate);
+                m_blockman.MarkBlockIndexDirty(*candidate);
                 // If invalidated, the block is irrelevant for setBlockIndexCandidates
                 // and for m_best_header and can be removed from the cache.
                 candidate_it = highpow_outofchain_headers.erase(candidate_it);
@@ -3596,7 +3596,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
         // Mark pindex as invalid if it never was in the main chain
         if (!pindex_was_in_chain && !(pindex->nStatus & BLOCK_FAILED_VALID)) {
             pindex->nStatus |= BLOCK_FAILED_VALID;
-            m_blockman.m_dirty_blockindex.insert(pindex);
+            m_blockman.MarkBlockIndexDirty(*pindex);
             setBlockIndexCandidates.erase(pindex);
         }
 
@@ -3646,7 +3646,7 @@ void Chainstate::SetBlockFailureFlags(CBlockIndex* invalid_block)
     for (auto& [_, block_index] : m_blockman.m_block_index) {
         if (invalid_block != &block_index && block_index.GetAncestor(invalid_block->nHeight) == invalid_block) {
             block_index.nStatus |= BLOCK_FAILED_VALID;
-            m_blockman.m_dirty_blockindex.insert(&block_index);
+            m_blockman.MarkBlockIndexDirty(block_index);
         }
     }
 }
@@ -3660,7 +3660,7 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
     for (auto& [_, block_index] : m_blockman.m_block_index) {
         if ((block_index.nStatus & BLOCK_FAILED_VALID) && (block_index.GetAncestor(nHeight) == pindex || pindex->GetAncestor(block_index.nHeight) == &block_index)) {
             block_index.nStatus &= ~BLOCK_FAILED_VALID;
-            m_blockman.m_dirty_blockindex.insert(&block_index);
+            m_blockman.MarkBlockIndexDirty(block_index);
             if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) && block_index.HaveNumChainTxs() && setBlockIndexCandidates.value_comp()(m_chain.Tip(), &block_index)) {
                 setBlockIndexCandidates.insert(&block_index);
             }
@@ -3729,7 +3729,7 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
         pindexNew->nStatus |= BLOCK_OPT_WITNESS;
     }
     pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
-    m_blockman.m_dirty_blockindex.insert(pindexNew);
+    m_blockman.MarkBlockIndexDirty(*pindexNew);
 
     if (pindexNew->pprev == nullptr || pindexNew->pprev->HaveNumChainTxs()) {
         // If pindexNew is the genesis block or all parents are BLOCK_VALID_TRANSACTIONS.
@@ -5889,7 +5889,7 @@ util::Result<void> ChainstateManager::PopulateAndValidateSnapshot(
             index->nStatus |= BLOCK_OPT_WITNESS;
         }
 
-        m_blockman.m_dirty_blockindex.insert(index);
+        m_blockman.MarkBlockIndexDirty(*index);
         // Changes to the block index will be flushed to disk after this call
         // returns in `ActivateSnapshot()`, when `MaybeRebalanceCaches()` is
         // called, since we've added a snapshot chainstate and therefore will
@@ -6324,7 +6324,7 @@ node::BlockPruneOptions Chainstate::GetBlockPruneOptions() const
     }
     const int num_chainstates{m_chainman.HistoricalChainstate() ? 2 : 1};
     prune.target_bytes = std::max(
-        MIN_DISK_SPACE_FOR_BLOCK_FILES, m_blockman.GetPruneTarget() / num_chainstates);
+        node::MIN_DISK_SPACE_FOR_BLOCK_FILES, m_blockman.GetPruneTarget() / num_chainstates);
 
     if (m_chainman.IsInitialBlockDownload() && m_chainman.m_best_header &&
         m_chainman.m_best_header->nHeight > prune.chain_tip_height) {

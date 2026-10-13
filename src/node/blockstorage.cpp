@@ -41,7 +41,6 @@
 #include <util/syserror.h>
 #include <util/time.h>
 #include <util/translation.h>
-#include <validation.h>
 
 #include <cerrno>
 #include <compare>
@@ -211,6 +210,12 @@ bool CBlockIndexWorkComparator::operator()(const CBlockIndex* pa, const CBlockIn
 bool CBlockIndexHeightOnlyComparator::operator()(const CBlockIndex* pa, const CBlockIndex* pb) const
 {
     return pa->nHeight < pb->nHeight;
+}
+
+void BlockManager::MarkBlockIndexDirty(CBlockIndex& index)
+{
+    AssertLockHeld(::cs_main);
+    m_dirty_blockindex.insert(&index);
 }
 
 std::vector<CBlockIndex*> BlockManager::GetAllBlockIndices()

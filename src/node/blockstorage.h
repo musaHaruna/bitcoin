@@ -43,8 +43,6 @@
 
 class BlockValidationState;
 class CBlockUndo;
-class Chainstate;
-class ChainstateManager;
 namespace Consensus {
 struct Params;
 }
@@ -121,6 +119,11 @@ inline constexpr unsigned int BLOCKFILE_CHUNK_SIZE{16_MiB};
 inline constexpr unsigned int UNDOFILE_CHUNK_SIZE{1_MiB};
 /** The maximum size of a blk?????.dat file (since 0.8) */
 inline constexpr unsigned int MAX_BLOCKFILE_SIZE{128_MiB};
+
+// Require at least 550 MiB for block and undo files. This covers the retained
+// reorganization window plus undo/orphan overhead and one full-file pruning
+// increment.
+static constexpr uint64_t MIN_DISK_SPACE_FOR_BLOCK_FILES{550_MiB};
 
 /** Size of header written by WriteBlock before a serialized CBlock (8 bytes) */
 inline constexpr uint32_t STORAGE_HEADER_BYTES{std::tuple_size_v<MessageStartChars> + sizeof(unsigned int)};
@@ -236,9 +239,6 @@ enum class BlockStorageFlushError {
  */
 class BlockManager
 {
-    friend Chainstate;
-    friend ChainstateManager;
-
 private:
     struct PrunePlan {
         std::set<int> files;
@@ -410,6 +410,8 @@ public:
 
     CBlockIndex* AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Mark a block-index entry for persistence. */
+    void MarkBlockIndexDirty(CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Create a new block index entry for a given block hash */
     CBlockIndex* InsertBlockIndex(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 

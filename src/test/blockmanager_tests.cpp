@@ -492,7 +492,7 @@ BOOST_AUTO_TEST_CASE(blockmanager_request_prune)
     KernelNotifications notifications{Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings)};
     const BlockManager::Options blockman_opts{
         .chainparams = Params(),
-        .prune_target = MIN_DISK_SPACE_FOR_BLOCK_FILES,
+        .prune_target = node::MIN_DISK_SPACE_FOR_BLOCK_FILES,
         .fast_prune = true,
         .blocks_dir = m_args.GetBlocksDirPath(),
         .notifications = notifications,
@@ -525,7 +525,7 @@ BOOST_AUTO_TEST_CASE(blockmanager_request_prune)
             .chain_tip_height = 200000,
             .first_prunable_height = 0,
             .last_prunable_height = 10,
-            .target_bytes = MIN_DISK_SPACE_FOR_BLOCK_FILES,
+            .target_bytes = node::MIN_DISK_SPACE_FOR_BLOCK_FILES,
         },
     };
 
@@ -536,7 +536,7 @@ BOOST_AUTO_TEST_CASE(blockmanager_request_prune)
     BOOST_CHECK(!allocation_result->Pruned());
 
     // Inflate only the file catalog entry, avoiding a large test file on disk.
-    blockman.GetBlockFileInfo(old_pos.nFile)->nSize = MIN_DISK_SPACE_FOR_BLOCK_FILES;
+    blockman.GetBlockFileInfo(old_pos.nFile)->nSize = node::MIN_DISK_SPACE_FOR_BLOCK_FILES;
 
     // Target pruning is demand-driven, so the same request is initially a no-op.
     auto idle_result{blockman.FlushBlockStorage(request)};
@@ -580,7 +580,7 @@ BOOST_AUTO_TEST_CASE(blockmanager_precomputed_prune_limits)
             KernelNotifications notifications{Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings)};
             const BlockManager::Options options{
                 .chainparams = Params(),
-                .prune_target = MIN_DISK_SPACE_FOR_BLOCK_FILES,
+                .prune_target = node::MIN_DISK_SPACE_FOR_BLOCK_FILES,
                 .fast_prune = true,
                 .blocks_dir = m_args.GetBlocksDirPath() / test.name,
                 .notifications = notifications,
