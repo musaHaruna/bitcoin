@@ -5,11 +5,13 @@
 #ifndef BITCOIN_NODE_CHAINSTATE_H
 #define BITCOIN_NODE_CHAINSTATE_H
 
+#include <util/fs.h>
 #include <util/translation.h>
 #include <validation.h>
 
 #include <cstdint>
 #include <functional>
+#include <span>
 #include <tuple>
 
 class CTxMemPool;
@@ -69,6 +71,11 @@ using ChainstateLoadResult = std::tuple<ChainstateLoadStatus, bilingual_str>;
 ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const kernel::CacheSizes& cache_sizes,
                                     const ChainstateLoadOptions& options);
 ChainstateLoadResult VerifyLoadedChainstate(ChainstateManager& chainman, const ChainstateLoadOptions& options);
+
+// Import blocks and call ActivateBestChains(), even when no blocks are imported.
+// This orchestration belongs with chainstate loading rather than block storage:
+// it coordinates validation while using block storage only as a dependency.
+void ImportBlocks(ChainstateManager& chainman, std::span<const fs::path> import_paths);
 } // namespace node
 
 #endif // BITCOIN_NODE_CHAINSTATE_H

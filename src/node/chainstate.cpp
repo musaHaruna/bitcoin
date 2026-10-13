@@ -23,7 +23,10 @@
 #include <validation.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <map>
+#include <span>
 #include <vector>
 
 using kernel::CacheSizes;
@@ -276,5 +279,82 @@ ChainstateLoadResult VerifyLoadedChainstate(ChainstateManager& chainman, const C
     }
 
     return {ChainstateLoadStatus::SUCCESS, {}};
+}
+
+namespace {
+class ImportingNow
+{
+    std::atomic<bool>& m_importing;
+
+public:
+    explicit ImportingNow(std::atomic<bool>& importing) : m_importing{importing}
+    {
+        assert(!m_importing);
+        m_importing = true;
+    }
+
+    ~ImportingNow()
+    {
+        assert(m_importing);
+        m_importing = false;
+    }
+};
+} // namespace
+
+void ImportBlocks(ChainstateManager& chainman, std::span<const fs::path> import_paths)
+{
+    auto& blockman{chainman.m_blockman};
+    ImportingNow importing{blockman.m_importing};
+
+    // -reindex
+    if (!blockman.m_blockfiles_indexed) {
+        int total_files{0};
+        while (fs::exists(blockman.GetBlockPosFilename(FlatFilePos(total_files, 0)))) {
+            ++total_files;
+        }
+
+        // Parent hash -> child disk position for blocks whose parent has not
+        // yet appeared in the reindex stream.
+        std::multimap<uint256, FlatFilePos> blocks_with_unknown_parent;
+        for (int file_number{0}; file_number < total_files; ++file_number) {
+            FlatFilePos pos{file_number, 0};
+            AutoFile file{blockman.OpenBlockFile(pos, /*fReadOnly=*/true)};
+            if (file.IsNull()) break; // OpenBlockFile logs the error.
+
+            LogInfo("Reindexing block file blk%05u.dat (%d%% complete)...",
+                    static_cast<unsigned>(file_number),
+                    file_number * 100 / total_files);
+            chainman.LoadExternalBlockFile(file, &pos, &blocks_with_unknown_parent);
+            if (chainman.m_interrupt) {
+                LogInfo("Interrupt requested. Exit reindexing.");
+                return;
+            }
+        }
+        WITH_LOCK(::cs_main, blockman.m_block_tree_db->WriteReindexing(false));
+        blockman.m_blockfiles_indexed = true;
+        LogInfo("Reindexing finished");
+        // Avoid ending without genesis if reindexing found no usable blocks.
+        (void)chainman.LoadGenesisBlock();
+    }
+
+    // -loadblock=
+    for (const fs::path& path : import_paths) {
+        AutoFile file{fsbridge::fopen(path, "rb")};
+        if (file.IsNull()) {
+            LogWarning("Could not open blocks file %s", fs::PathToString(path));
+            continue;
+        }
+
+        LogInfo("Importing blocks file %s...", fs::PathToString(path));
+        chainman.LoadExternalBlockFile(file);
+        if (chainman.m_interrupt) {
+            LogInfo("Interrupt requested. Exit block importing.");
+            return;
+        }
+    }
+
+    if (auto result{chainman.ActivateBestChains()}; !result) {
+        chainman.GetNotifications().fatalError(util::ErrorString(result));
+    }
 }
 } // namespace node
