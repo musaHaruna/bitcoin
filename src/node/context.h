@@ -40,6 +40,7 @@ class SignalInterrupt;
 }
 
 namespace node {
+class BlockManager;
 class BlockTemplateManager;
 class KernelNotifications;
 class Warnings;
@@ -71,6 +72,21 @@ struct NodeContext {
     std::unique_ptr<FeeRateEstimatorManager> fee_estimator_man;
     std::unique_ptr<PeerManager> peerman;
     std::unique_ptr<TorController> tor_controller;
+    //! ValidationSignals may own a task runner that borrows this scheduler.
+    std::unique_ptr<CScheduler> scheduler;
+    std::atomic<int> exit_status{EXIT_SUCCESS};
+    //! Manages all node warnings. Declared before notifications because
+    //! KernelNotifications borrows it.
+    std::unique_ptr<node::Warnings> warnings;
+    //! Issues blocking calls about sync status, errors, and warnings. Both
+    //! managers borrow this object through their options.
+    std::unique_ptr<KernelNotifications> notifications;
+    //! Issues calls about blocks and transactions. ChainstateManager borrows
+    //! this object through its options.
+    std::unique_ptr<ValidationSignals> validation_signals;
+    //! Block storage is owned separately from validation. Keep this declaration
+    //! before chainman so reverse destruction destroys chainman first.
+    std::unique_ptr<BlockManager> blockman;
     std::unique_ptr<ChainstateManager> chainman;
     std::unique_ptr<BanMan> banman;
     ArgsManager* args{nullptr}; // Currently a raw pointer because the memory is not managed by this struct
@@ -79,17 +95,9 @@ struct NodeContext {
     //! List of all chain clients (wallet processes or other client) connected to node.
     std::vector<std::unique_ptr<interfaces::ChainClient>> chain_clients;
     interfaces::WalletLoader* wallet_loader{nullptr};
-    std::unique_ptr<CScheduler> scheduler;
     std::function<void()> rpc_interruption_point = [] {};
-    //! Issues blocking calls about sync status, errors and warnings
-    std::unique_ptr<KernelNotifications> notifications;
     //! Must be destroyed before its dependencies (holds references to them).
     std::unique_ptr<BlockTemplateManager> block_template_manager;
-    //! Issues calls about blocks and transactions
-    std::unique_ptr<ValidationSignals> validation_signals;
-    std::atomic<int> exit_status{EXIT_SUCCESS};
-    //! Manages all the node warnings
-    std::unique_ptr<node::Warnings> warnings;
     std::thread background_init_thread;
 
     //! Declare default constructor and destructor that are not inline, so code

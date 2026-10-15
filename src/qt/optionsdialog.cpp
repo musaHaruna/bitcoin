@@ -16,6 +16,7 @@
 #include <common/system.h>
 #include <interfaces/node.h>
 #include <netbase.h>
+#include <node/blockstorage.h>
 #include <node/caches.h>
 #include <node/chainstatemanager_args.h>
 #include <util/strencodings.h>
@@ -226,7 +227,7 @@ void OptionsDialog::setModel(OptionsModel *_model)
             showRestartWarning(true);
 
         // Prune values are in GB to be consistent with intro.cpp
-        static constexpr uint64_t nMinDiskSpace = (MIN_DISK_SPACE_FOR_BLOCK_FILES / GB_BYTES) + (MIN_DISK_SPACE_FOR_BLOCK_FILES % GB_BYTES) ? 1 : 0;
+        static constexpr uint64_t nMinDiskSpace = (node::MIN_DISK_SPACE_FOR_BLOCK_FILES / GB_BYTES) + (node::MIN_DISK_SPACE_FOR_BLOCK_FILES % GB_BYTES) ? 1 : 0;
         ui->pruneSize->setRange(nMinDiskSpace, std::numeric_limits<int>::max());
 
         QString strLabel = _model->getOverriddenByCommandLine();

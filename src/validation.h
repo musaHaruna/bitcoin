@@ -76,15 +76,6 @@ class SignalInterrupt;
 inline constexpr unsigned int MIN_BLOCKS_TO_KEEP = 288;
 inline constexpr signed int DEFAULT_CHECKBLOCKS = 6;
 inline constexpr int DEFAULT_CHECKLEVEL{3};
-// Require that user allocate at least 550 MiB for block & undo files (blk???.dat and rev???.dat)
-// At 1MB per block, 288 blocks = 288MB.
-// Add 15% for Undo data = 331MB
-// Add 20% for Orphan block rate = 397MB
-// We want the low water mark after pruning to be at least 397 MB and since we prune in
-// full block file chunks, we need the high water mark which triggers the prune to be
-// one 128MB block file + added 15% undo data = 147MB greater for a total of 545MB
-// Setting the target to >= 550 MiB will make it likely we can respect the target.
-inline constexpr uint64_t MIN_DISK_SPACE_FOR_BLOCK_FILES{550_MiB};
 
 /** Maximum number of dedicated script-checking threads allowed */
 inline constexpr int MAX_SCRIPTCHECK_THREADS{15};
@@ -854,10 +845,8 @@ public:
         return m_mempool ? &m_mempool->cs : nullptr;
     }
 
-    //! Return the [start, end] (inclusive) of block heights we can prune.
-    //!
-    //! start > end is possible, meaning no blocks can be pruned.
-    std::pair<int, int> GetPruneRange(int last_height_can_prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Calculate safe pruning bounds, target bytes, and extra headroom for storage. */
+    node::BlockPruneOptions GetBlockPruneOptions() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 protected:
     bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex& index_most_work, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, std::vector<ConnectedBlock>& connected_blocks) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
@@ -1008,7 +997,10 @@ protected:
 public:
     using Options = kernel::ChainstateManagerOpts;
 
-    explicit ChainstateManager(const util::SignalInterrupt& interrupt, Options options, node::BlockManager::Options blockman_options);
+    explicit ChainstateManager(
+        const util::SignalInterrupt& interrupt,
+        Options options,
+        node::BlockManager& blockman);
 
     //! Function to restart active indexes; set dynamically to avoid a circular
     //! dependency on `base/index.cpp`.
@@ -1043,9 +1035,10 @@ public:
 
     const util::SignalInterrupt& m_interrupt;
     const Options m_options;
-    //! A single BlockManager instance is shared across each constructed
-    //! chainstate to avoid duplicating block metadata.
-    node::BlockManager m_blockman;
+    //! Non-owning storage reference shared by every constructed chainstate.
+    //! The composition root must keep it alive until this manager and all
+    //! chainstates have been destroyed.
+    node::BlockManager& m_blockman;
 
     ValidationCache m_validation_cache;
 

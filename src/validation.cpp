@@ -107,13 +107,6 @@ const std::vector<std::string> CHECKLEVEL_DOC {
     "level 4 tries to reconnect the blocks",
     "each level includes the checks of the previous levels",
 };
-/** The number of blocks to keep below the deepest prune lock.
- *  There is nothing special about this number. It is higher than what we
- *  expect to see in regular mainnet reorgs, but not so high that it would
- *  noticeably interfere with the pruning mechanism.
- * */
-static constexpr int PRUNE_LOCK_BUFFER{10};
-
 // Return whether the completed full flush should compact chainstate
 static bool ShouldCompactChainstate(bool in_ibd)
 {
@@ -1989,7 +1982,7 @@ void Chainstate::InvalidBlockFound(CBlockIndex* pindex, const BlockValidationSta
     AssertLockHeld(cs_main);
     if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
         pindex->nStatus |= BLOCK_FAILED_VALID;
-        m_blockman.m_dirty_blockindex.insert(pindex);
+        m_blockman.MarkBlockIndexDirty(*pindex);
         setBlockIndexCandidates.erase(pindex);
         InvalidChainFound(pindex);
     }
@@ -2645,7 +2638,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     if (!pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
         pindex->RaiseValidity(BLOCK_VALID_SCRIPTS);
-        m_blockman.m_dirty_blockindex.insert(pindex);
+        m_blockman.MarkBlockIndexDirty(*pindex);
     }
 
     // add this block to the view's block chain
@@ -2704,7 +2697,7 @@ bool Chainstate::FlushStateToDisk(
 {
     LOCK(cs_main);
     assert(this->CanFlushToDisk());
-    std::set<int> setFilesToPrune;
+    assert(nManualPruneHeight >= 0);
     bool full_flush_completed = false;
 
     [[maybe_unused]] const size_t coins_count{CoinsTip().GetCacheSize()};
@@ -2712,50 +2705,7 @@ bool Chainstate::FlushStateToDisk(
 
     try {
     {
-        bool fFlushForPrune = false;
-
         CoinsCacheSizeState cache_state = GetCoinsCacheSizeState();
-        if (m_blockman.IsPruneMode() && (m_blockman.m_check_for_pruning || nManualPruneHeight > 0) && m_chainman.m_blockman.m_blockfiles_indexed) {
-            // make sure we don't prune above any of the prune locks bestblocks
-            // pruning is height-based
-            int last_prune{m_chain.Height()}; // last height we can prune
-            std::optional<std::string> limiting_lock; // prune lock that actually was the limiting factor, only used for logging
-
-            for (const auto& prune_lock : m_blockman.m_prune_locks) {
-                if (prune_lock.second.height_first == std::numeric_limits<int>::max()) continue;
-                // Remove the buffer and one additional block here to get actual height that is outside of the buffer
-                const int lock_height{prune_lock.second.height_first - PRUNE_LOCK_BUFFER - 1};
-                last_prune = std::max(1, std::min(last_prune, lock_height));
-                if (last_prune == lock_height) {
-                    limiting_lock = prune_lock.first;
-                }
-            }
-
-            if (limiting_lock) {
-                LogDebug(BCLog::PRUNE, "%s limited pruning to height %d\n", limiting_lock.value(), last_prune);
-            }
-
-            if (nManualPruneHeight > 0) {
-                LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune (manual)", BCLog::BENCH);
-
-                m_blockman.FindFilesToPruneManual(
-                    setFilesToPrune,
-                    std::min(last_prune, nManualPruneHeight),
-                    *this);
-            } else {
-                LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune", BCLog::BENCH);
-
-                m_blockman.FindFilesToPrune(setFilesToPrune, last_prune, *this, m_chainman);
-                m_blockman.m_check_for_pruning = false;
-            }
-            if (!setFilesToPrune.empty()) {
-                fFlushForPrune = true;
-                if (!m_blockman.m_have_pruned) {
-                    m_blockman.m_block_tree_db->WriteFlag("prunedblockfiles", true);
-                    m_blockman.m_have_pruned = true;
-                }
-            }
-        }
         const auto nNow{NodeClock::now()};
         // The cache is large and we're within 10% and 10 MiB of the limit, but we have time now (not in the middle of a block processing).
         bool fCacheLarge = mode == FlushStateMode::PERIODIC && cache_state >= CoinsCacheSizeState::LARGE;
@@ -2764,40 +2714,32 @@ bool Chainstate::FlushStateToDisk(
         // It's been a while since we wrote the block index and chain state to disk. Do this frequently, so we don't need to redownload or reindex after a crash.
         bool fPeriodicWrite = mode == FlushStateMode::PERIODIC && nNow >= m_next_write;
         const auto empty_cache{(mode == FlushStateMode::FORCE_FLUSH) || fCacheLarge || fCacheCritical};
-        // Combine all conditions that result in a write to disk.
-        bool should_write = (mode == FlushStateMode::FORCE_SYNC) || empty_cache || fPeriodicWrite || fFlushForPrune;
-        // Write blocks, block index and best chain related state to disk.
+        const bool write_block_index{
+            (mode == FlushStateMode::FORCE_SYNC) || empty_cache || fPeriodicWrite};
+
+        // Validation supplies precomputed pruning limits. BlockManager
+        // owns prune locks, file planning, metadata mutation, persistence, and
+        // physical deletion as one ordered storage operation.
+        auto storage_result{m_blockman.FlushBlockStorage({
+            .prune = GetBlockPruneOptions(),
+            .write_block_index = write_block_index,
+            .manual_prune_height = nManualPruneHeight > 0
+                ? std::optional<int>{nManualPruneHeight}
+                : std::nullopt,
+        })};
+        if (!storage_result) {
+            if (storage_result.error() == node::BlockStorageFlushError::FLUSH_FAILED) {
+                return state.Error("Failed to flush block or undo file");
+            }
+            assert(storage_result.error() == node::BlockStorageFlushError::OUT_OF_DISK_SPACE);
+            return FatalError(m_chainman.GetNotifications(), state, _("Disk space is too low!"));
+        }
+
+        const bool fFlushForPrune{storage_result->Pruned()};
+        const bool should_write{storage_result->wrote_block_index};
         if (should_write) {
             LogDebug(BCLog::COINDB, "Writing chainstate to disk: flush mode=%s, prune=%d, large=%d, critical=%d, periodic=%d",
                      FlushStateModeNames[size_t(mode)], fFlushForPrune, fCacheLarge, fCacheCritical, fPeriodicWrite);
-
-            // Ensure we can write block index
-            if (!CheckDiskSpace(m_blockman.m_opts.blocks_dir)) {
-                return FatalError(m_chainman.GetNotifications(), state, _("Disk space is too low!"));
-            }
-            {
-                LOG_TIME_MILLIS_WITH_CATEGORY("write block and undo data to disk", BCLog::BENCH);
-
-                // First make sure all block and undo data is flushed to disk.
-                // TODO: Handle return error, or add detailed comment why it is
-                // safe to not return an error upon failure.
-                if (!m_blockman.FlushChainstateBlockFile(m_chain.Height())) {
-                    LogWarning("%s: Failed to flush block file.\n", __func__);
-                }
-            }
-
-            // Then update all block file information (which may refer to block and undo files).
-            {
-                LOG_TIME_MILLIS_WITH_CATEGORY("write block index to disk", BCLog::BENCH);
-
-                m_blockman.WriteBlockIndexDB();
-            }
-            // Finally remove any pruned files
-            if (fFlushForPrune) {
-                LOG_TIME_MILLIS_WITH_CATEGORY("unlink pruned files", BCLog::BENCH);
-
-                m_blockman.UnlinkPrunedFiles(setFilesToPrune);
-            }
 
             if (!CoinsTip().GetBestBlock().IsNull()) {
                 // Typical Coin structures on disk are around 48 bytes in size.
@@ -2855,8 +2797,8 @@ void Chainstate::ForceFlushStateToDisk(bool wipe_cache)
 
 void Chainstate::PruneAndFlush()
 {
+    WITH_LOCK(cs_main, m_blockman.RequestPrune());
     BlockValidationState state;
-    m_blockman.m_check_for_pruning = true;
     if (!this->FlushStateToDisk(state, FlushStateMode::NONE)) {
         LogWarning("Failed to flush state (%s)", state.ToString());
     }
@@ -2962,16 +2904,9 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     LogDebug(BCLog::BENCH, "- Disconnect block: %.2fms\n",
              Ticks<MillisecondsDouble>(SteadyClock::now() - time_start));
 
-    {
-        // Prune locks that began at or after the tip should be moved backward so they get a chance to reorg
-        const int max_height_first{pindexDelete->nHeight - 1};
-        for (auto& prune_lock : m_blockman.m_prune_locks) {
-            if (prune_lock.second.height_first <= max_height_first) continue;
-
-            prune_lock.second.height_first = max_height_first;
-            LogDebug(BCLog::PRUNE, "%s prune lock moved back to %d\n", prune_lock.first, max_height_first);
-        }
-    }
+    // Prune locks that began at or after the disconnected tip must move back
+    // so their consumers retain enough data to follow the reorganization.
+    m_blockman.RewindPruneLocks(pindexDelete->nHeight - 1);
 
     // Write the chain state to disk, if necessary.
     if (!FlushStateToDisk(state, FlushStateMode::IF_NEEDED)) {
@@ -3605,7 +3540,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
         // are no blocks that meet the "have data and are not invalid per
         // nStatus" criteria for inclusion in setBlockIndexCandidates).
         disconnected_tip->nStatus |= BLOCK_FAILED_VALID;
-        m_blockman.m_dirty_blockindex.insert(disconnected_tip);
+        m_blockman.MarkBlockIndexDirty(*disconnected_tip);
         setBlockIndexCandidates.erase(disconnected_tip);
         setBlockIndexCandidates.insert(new_tip);
 
@@ -3625,7 +3560,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
             if (candidate->GetAncestor(disconnected_tip->nHeight) == disconnected_tip) {
                 // Children of failed blocks are marked as BLOCK_FAILED_VALID.
                 candidate->nStatus |= BLOCK_FAILED_VALID;
-                m_blockman.m_dirty_blockindex.insert(candidate);
+                m_blockman.MarkBlockIndexDirty(*candidate);
                 // If invalidated, the block is irrelevant for setBlockIndexCandidates
                 // and for m_best_header and can be removed from the cache.
                 candidate_it = highpow_outofchain_headers.erase(candidate_it);
@@ -3661,7 +3596,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* const
         // Mark pindex as invalid if it never was in the main chain
         if (!pindex_was_in_chain && !(pindex->nStatus & BLOCK_FAILED_VALID)) {
             pindex->nStatus |= BLOCK_FAILED_VALID;
-            m_blockman.m_dirty_blockindex.insert(pindex);
+            m_blockman.MarkBlockIndexDirty(*pindex);
             setBlockIndexCandidates.erase(pindex);
         }
 
@@ -3711,7 +3646,7 @@ void Chainstate::SetBlockFailureFlags(CBlockIndex* invalid_block)
     for (auto& [_, block_index] : m_blockman.m_block_index) {
         if (invalid_block != &block_index && block_index.GetAncestor(invalid_block->nHeight) == invalid_block) {
             block_index.nStatus |= BLOCK_FAILED_VALID;
-            m_blockman.m_dirty_blockindex.insert(&block_index);
+            m_blockman.MarkBlockIndexDirty(block_index);
         }
     }
 }
@@ -3725,7 +3660,7 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
     for (auto& [_, block_index] : m_blockman.m_block_index) {
         if ((block_index.nStatus & BLOCK_FAILED_VALID) && (block_index.GetAncestor(nHeight) == pindex || pindex->GetAncestor(block_index.nHeight) == &block_index)) {
             block_index.nStatus &= ~BLOCK_FAILED_VALID;
-            m_blockman.m_dirty_blockindex.insert(&block_index);
+            m_blockman.MarkBlockIndexDirty(block_index);
             if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) && block_index.HaveNumChainTxs() && setBlockIndexCandidates.value_comp()(m_chain.Tip(), &block_index)) {
                 setBlockIndexCandidates.insert(&block_index);
             }
@@ -3794,7 +3729,7 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
         pindexNew->nStatus |= BLOCK_OPT_WITNESS;
     }
     pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
-    m_blockman.m_dirty_blockindex.insert(pindexNew);
+    m_blockman.MarkBlockIndexDirty(*pindexNew);
 
     if (pindexNew->pprev == nullptr || pindexNew->pprev->HaveNumChainTxs()) {
         // If pindexNew is the genesis block or all parents are BLOCK_VALID_TRANSACTIONS.
@@ -5954,7 +5889,7 @@ util::Result<void> ChainstateManager::PopulateAndValidateSnapshot(
             index->nStatus |= BLOCK_OPT_WITNESS;
         }
 
-        m_blockman.m_dirty_blockindex.insert(index);
+        m_blockman.MarkBlockIndexDirty(*index);
         // Changes to the block index will be flushed to disk after this call
         // returns in `ActivateSnapshot()`, when `MaybeRebalanceCaches()` is
         // called, since we've added a snapshot chainstate and therefore will
@@ -6150,11 +6085,14 @@ static ChainstateManager::Options&& Flatten(ChainstateManager::Options&& opts)
     return std::move(opts);
 }
 
-ChainstateManager::ChainstateManager(const util::SignalInterrupt& interrupt, Options options, node::BlockManager::Options blockman_options)
+ChainstateManager::ChainstateManager(
+    const util::SignalInterrupt& interrupt,
+    Options options,
+    node::BlockManager& blockman)
     : m_script_check_queue{/*batch_size=*/128, std::clamp(options.worker_threads_num, 0, MAX_SCRIPTCHECK_THREADS)},
       m_interrupt{interrupt},
       m_options{Flatten(std::move(options))},
-      m_blockman{interrupt, std::move(blockman_options)},
+      m_blockman{blockman},
       m_validation_cache{m_options.script_execution_cache_bytes, m_options.signature_cache_bytes}
 {
 }
@@ -6362,32 +6300,44 @@ bool ChainstateManager::ValidatedSnapshotCleanup(Chainstate& validated_cs, Chain
     return true;
 }
 
-std::pair<int, int> Chainstate::GetPruneRange(int last_height_can_prune) const
+node::BlockPruneOptions Chainstate::GetBlockPruneOptions() const
 {
-    if (m_chain.Height() <= 0) {
-        return {0, 0};
-    }
-    int prune_start{0};
+    AssertLockHeld(::cs_main);
+    node::BlockPruneOptions prune{.chain_tip_height = m_chain.Height()};
+
+    if (prune.chain_tip_height <= 0) return prune;
 
     if (m_from_snapshot_blockhash && m_assumeutxo != Assumeutxo::VALIDATED) {
         // Only prune blocks _after_ the snapshot if this is a snapshot chain
         // that has not been fully validated yet. The earlier blocks need to be
         // kept to validate the snapshot
-        prune_start = Assert(SnapshotBase())->nHeight + 1;
+        prune.first_prunable_height = Assert(SnapshotBase())->nHeight + 1;
     }
 
-    int max_prune = std::max<int>(
-        0, m_chain.Height() - static_cast<int>(MIN_BLOCKS_TO_KEEP));
-
-    // last block to prune is the lesser of (caller-specified height, MIN_BLOCKS_TO_KEEP from the tip)
-    //
     // While you might be tempted to prune the background chainstate more
     // aggressively (i.e. fewer MIN_BLOCKS_TO_KEEP), this won't work with index
     // building - specifically blockfilterindex requires undo data, and if
     // we don't maintain this trailing window, we hit indexing failures.
-    int prune_end = std::min(last_height_can_prune, max_prune);
+    prune.last_prunable_height = std::max<int>(
+        0, m_chain.Height() - static_cast<int>(MIN_BLOCKS_TO_KEEP));
+    // Automatic-pruning eligibility and chainstate-dependent space policy
+    // belong to validation. A zero target leaves manual pruning available.
+    if (static_cast<uint64_t>(prune.chain_tip_height) <= m_chainman.GetParams().PruneAfterHeight()) {
+        return prune;
+    }
+    const int num_chainstates{m_chainman.HistoricalChainstate() ? 2 : 1};
+    prune.target_bytes = std::max(
+        node::MIN_DISK_SPACE_FOR_BLOCK_FILES, m_blockman.GetPruneTarget() / num_chainstates);
 
-    return {prune_start, prune_end};
+    if (m_chainman.IsInitialBlockDownload() && m_chainman.m_best_header &&
+        m_chainman.m_best_header->nHeight > prune.chain_tip_height) {
+        // Estimate remaining download space to avoid repeated prune/coins flushes.
+        static constexpr uint64_t AVERAGE_BLOCK_SIZE{1'000'000};
+        const uint64_t remaining_blocks{
+            static_cast<uint64_t>(m_chainman.m_best_header->nHeight - prune.chain_tip_height)};
+        prune.extra_space = AVERAGE_BLOCK_SIZE * remaining_blocks;
+    }
+    return prune;
 }
 
 std::optional<std::pair<const CBlockIndex*, const CBlockIndex*>> ChainstateManager::GetHistoricalBlockRange() const

@@ -11,8 +11,6 @@
 #include <util/byte_units.h>
 #include <util/result.h>
 #include <util/translation.h>
-#include <validation.h>
-
 #include <cstdint>
 
 namespace node {
