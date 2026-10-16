@@ -25,10 +25,13 @@
 #include <test/util/validation.h>
 #include <util/byte_units.h>
 #include <util/check.h>
+#include <util/fs.h>
 #include <util/strencodings.h>
 #include <validation.h>
 
 #include <cstdint>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -350,6 +353,79 @@ BOOST_FIXTURE_TEST_CASE(txindex_reorg_keeps_stale_entries, TestChain100Setup)
     BOOST_CHECK(reorg_bucket.front() == original_bucket.front());
 
     StopIndex(txindex, m_node);
+}
+
+// Review reproduction: corrupt only this fixture's temporary SST files after startup.
+BOOST_FIXTURE_TEST_CASE(txindex_iterator_storage_error, TestChain100Setup)
+{
+    TxIndex txindex{interfaces::MakeChain(m_node), /*n_cache_size=*/1_MiB, /*f_memory=*/false};
+    BOOST_REQUIRE(txindex.Init());
+    txindex.Sync();
+    const Txid txid{m_coinbase_txns.front()->GetHash()};
+    LookupTx(txindex, txid);
+    BOOST_CHECK(!txindex.FindTx(Txid{}));
+    StopIndex(txindex, m_node); // No index writer should race the injected fault.
+
+    CDBWrapper& db{TxIndexTest::GetDB(txindex)};
+    const auto prefix{txindex::CreateKeyPrefix(ReadHasher(db), txid)};
+    db.CompactFull(); // Flush the entries out of the memtable/WAL into SST files.
+    std::vector<std::pair<fs::path, std::string>> originals;
+    const fs::path path{gArgs.GetDataDirNet() / "indexes" / "txindex"};
+    for (const auto& entry : fs::directory_iterator(path)) {
+        if (entry.path().extension() != ".ldb") continue;
+        std::ifstream input{entry.path(), std::ios::binary};
+        BOOST_REQUIRE(input.is_open());
+        std::string bytes{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+        BOOST_REQUIRE(!bytes.empty());
+        originals.emplace_back(entry.path(), bytes);
+        // Preserve file length: truncating a mapped live file can cause SIGBUS.
+        std::fstream output{entry.path(), std::ios::binary | std::ios::in | std::ios::out};
+        // Preserve the table index and footer, including any live mmap view.
+        // Only damage data blocks so seeking still reaches checksum verification.
+        // LevelDB's 48-byte footer starts with the metaindex block's varint offset.
+        // This local reproduction uses the bundled SST format; no production parser changes.
+        BOOST_REQUIRE_GE(bytes.size(), 48U);
+        uint64_t data_end{0};
+        size_t pos{bytes.size() - 48};
+        for (unsigned shift{0};; shift += 7) {
+            BOOST_REQUIRE_LT(shift, 64U);
+            BOOST_REQUIRE_LT(pos, bytes.size());
+            const auto byte{static_cast<uint8_t>(bytes[pos++])};
+            data_end |= uint64_t{byte & 0x7fU} << shift;
+            if (!(byte & 0x80)) break;
+        }
+        BOOST_REQUIRE_GT(data_end, 0U);
+        BOOST_REQUIRE_LT(data_end, bytes.size());
+        const std::string damage(data_end, '\0');
+        output.write(damage.data(), damage.size());
+        output.close();
+        BOOST_REQUIRE(!output.fail());
+    }
+    BOOST_REQUIRE(!originals.empty());
+    BOOST_TEST_MESSAGE("Initialized index; damaged " << originals.size() << " SST file(s) after compaction");
+    {
+        std::unique_ptr<CDBIterator> it{db.NewIterator()};
+        it->Seek(txindex::DBKey{prefix, {}});
+        BOOST_CHECK(!it->Valid());
+        BOOST_CHECK_EXCEPTION(it->CheckStatus(), dbwrapper_error, [](const auto& e) {
+            BOOST_TEST_MESSAGE("Iterator status: " << e.what());
+            return std::string_view{e.what()}.starts_with("Fatal LevelDB error");
+        });
+    }
+    // Reproduce the bug: a detected iterator error is returned as an ordinary miss.
+    BOOST_CHECK_NO_THROW([&] {
+        const auto result{txindex.FindTx(txid)};
+        BOOST_CHECK(!result.has_value());
+        BOOST_TEST_MESSAGE("FindTx returned " << (result ? "a transaction" : "nullopt") << " without throwing");
+    }());
+    for (const auto& [file, bytes] : originals) {
+        std::fstream output{fs::PathToString(file), std::ios::binary | std::ios::in | std::ios::out};
+        output.write(bytes.data(), bytes.size());
+        output.close();
+        BOOST_REQUIRE(!output.fail());
+    }
+    LookupTx(txindex, txid);
+    BOOST_CHECK(!txindex.FindTx(Txid{}));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
