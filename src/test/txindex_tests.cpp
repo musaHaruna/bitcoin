@@ -412,12 +412,15 @@ BOOST_FIXTURE_TEST_CASE(txindex_iterator_storage_error, TestChain100Setup)
             return std::string_view{e.what()}.starts_with("Fatal LevelDB error");
         });
     }
-    // Reproduce the bug: a detected iterator error is returned as an ordinary miss.
-    BOOST_CHECK_NO_THROW([&] {
+    // This regression assertion must fail before the FindTx status check is added.
+    const auto lookup = [&] {
         const auto result{txindex.FindTx(txid)};
-        BOOST_CHECK(!result.has_value());
         BOOST_TEST_MESSAGE("FindTx returned " << (result ? "a transaction" : "nullopt") << " without throwing");
-    }());
+    };
+    BOOST_CHECK_EXCEPTION(lookup(), dbwrapper_error, [](const auto& e) {
+        BOOST_TEST_MESSAGE("FindTx exception: " << e.what());
+        return std::string_view{e.what()}.starts_with("Fatal LevelDB error");
+    });
     for (const auto& [file, bytes] : originals) {
         std::fstream output{fs::PathToString(file), std::ios::binary | std::ios::in | std::ios::out};
         output.write(bytes.data(), bytes.size());
