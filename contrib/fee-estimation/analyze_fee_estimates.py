@@ -27,6 +27,7 @@ import os
 import statistics
 import sys
 import tempfile
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2012,6 +2013,8 @@ Generated at `{generated}` from `{input_path}`.
 
 Rates in the tables and CSV files are **sat/kvB**. Divide by 1,000 for sat/vB. The analyzer prefers the exact `(fee_sats, vsize)` fraction emitted by verbosity 3; the rounded BTC/kvB RPC field is only a fallback.
 
+{("This report used the low-memory summary path. Counts, percentages, means, MAE, and RMSE are exact. Quantile-only columns are blank, and the large per-sample CSV files were not generated." if settings.get("summary_only") else "This report used the full-detail analysis path, including per-sample CSV files and quantiles.")}
+
 ## How I interpret these results
 
 I evaluate each estimate against two horizons: the block target I asked for and the target that the estimator actually returned.
@@ -2092,6 +2095,599 @@ def filter_experiment_records(
     return expected
 
 
+@dataclass
+class RunningNumbers:
+    count: int = 0
+    total: float = 0.0
+    square_total: float = 0.0
+    absolute_total: float = 0.0
+
+    def add(self, value: Any) -> None:
+        if isinstance(value, decimal.Decimal):
+            value = float(value)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return
+        number = float(value)
+        if not math.isfinite(number):
+            return
+        self.count += 1
+        self.total += number
+        self.square_total += number * number
+        self.absolute_total += abs(number)
+
+    def mean(self) -> float | None:
+        return self.total / self.count if self.count else None
+
+    def mean_absolute(self) -> float | None:
+        return self.absolute_total / self.count if self.count else None
+
+    def rmse(self) -> float | None:
+        return math.sqrt(self.square_total / self.count) if self.count else None
+
+
+@dataclass
+class StreamGroup:
+    counts: Counter[str] = field(default_factory=Counter)
+    classifications: Counter[str] = field(default_factory=Counter)
+    interval_classifications: Counter[str] = field(default_factory=Counter)
+    horizon_classifications: Counter[str] = field(default_factory=Counter)
+    unavailable_reasons: Counter[str] = field(default_factory=Counter)
+    exclusion_reasons: Counter[str] = field(default_factory=Counter)
+    anchor_tips: set[str] = field(default_factory=set)
+    target_blocks: set[str] = field(default_factory=set)
+    tip_classes: dict[str, Counter[str]] = field(default_factory=lambda: defaultdict(Counter))
+    estimate: RunningNumbers = field(default_factory=RunningNumbers)
+    point_error: RunningNumbers = field(default_factory=RunningNumbers)
+    interval_error: RunningNumbers = field(default_factory=RunningNumbers)
+    average_error: RunningNumbers = field(default_factory=RunningNumbers)
+    horizon_error: RunningNumbers = field(default_factory=RunningNumbers)
+
+    def add(self, row: Mapping[str, Any]) -> None:
+        counts = self.counts
+        counts["samples"] += 1
+        for name in ("available", "valid_strict", "warmup", "mature", "outcome_available"):
+            counts[name] += int(bool(row.get(name)))
+        consistency = row.get("output_consistent")
+        counts["consistent"] += int(consistency is True)
+        counts["inconsistent"] += int(consistency is False)
+        counts["consistency_unknown"] += int(consistency is None)
+        tip_status = str(row.get("canonical_tip_status") or "unknown")
+        counts[f"tip_{tip_status}"] += 1
+        counts["tip_sensitivity"] += int(bool(row.get("tip_consistent_sensitivity_included")))
+        if not row.get("available"):
+            reason = str(row.get("estimator_error") or row.get("returned_error") or "unspecified")
+            self.unavailable_reasons[reason] += 1
+        for reason in str(row.get("analysis_exclusion_reason", "")).split(";"):
+            if reason:
+                self.exclusion_reasons[reason] += 1
+
+        if row.get("analysis_included"):
+            counts["evaluated"] += 1
+            classification = str(row.get("primary_classification") or "")
+            self.classifications[classification] += 1
+            self.estimate.add(row.get("estimate_sat_kvb"))
+            self.point_error.add(row.get("point_signed_error_sat_kvb"))
+            self.average_error.add(row.get("average_signed_error_sat_kvb"))
+            tip = str(row.get("tip_hash") or "")
+            target = str(row.get("target_block_hash") or "")
+            if tip:
+                self.anchor_tips.add(tip)
+                self.tip_classes[tip][classification] += 1
+                self.tip_classes[tip]["total"] += 1
+            if target:
+                self.target_blocks.add(target)
+            if row.get("trigger") == "interval":
+                counts["interval_evaluated"] += 1
+                self.interval_classifications[classification] += 1
+                self.interval_error.add(row.get("point_signed_error_sat_kvb"))
+
+        if row.get("horizon_analysis_included"):
+            counts["horizon_evaluated"] += 1
+            self.horizon_classifications[str(row.get("horizon_classification") or "")] += 1
+            self.horizon_error.add(row.get("horizon_point_signed_error_sat_kvb"))
+
+    def summary(self, key: tuple[str, str, str, str]) -> dict[str, Any]:
+        output, mode, target, scope = key
+        samples = self.counts["samples"]
+        evaluated = self.counts["evaluated"]
+        interval = self.counts["interval_evaluated"]
+        horizon = self.counts["horizon_evaluated"]
+
+        def tip_share(name: str) -> float | None:
+            shares = [values[name] / values["total"] for values in self.tip_classes.values() if values["total"]]
+            return 100.0 * statistics.fmean(shares) if shares else None
+
+        # Quantile-only columns are intentionally blank in summary-only mode.
+        # The headline counts and arithmetic error metrics remain exact.
+        return {
+            "output": output, "mode": mode, "requested_target": target,
+            "evaluation_scope": scope, "samples": samples,
+            "available": self.counts["available"],
+            "available_pct": pct(self.counts["available"], samples),
+            "strict_valid": self.counts["valid_strict"],
+            "consistent": self.counts["consistent"], "warmup": self.counts["warmup"],
+            "canonical_tip": self.counts["tip_canonical"], "mature": self.counts["mature"],
+            "evaluated": evaluated, "evaluated_pct": pct(evaluated, samples),
+            "interval_evaluated": interval,
+            "interval_underestimate_pct": pct(self.interval_classifications["underestimate"], interval),
+            "interval_within_band_pct": pct(self.interval_classifications["within_band"], interval),
+            "interval_overestimate_pct": pct(self.interval_classifications["overestimate"], interval),
+            "interval_point_mean_bias_sat_kvb": self.interval_error.mean(),
+            "interval_point_mae_sat_kvb": self.interval_error.mean_absolute(),
+            "distinct_anchor_tips": len(self.anchor_tips),
+            "distinct_target_blocks": len(self.target_blocks),
+            "estimate_mean_sat_kvb": self.estimate.mean(),
+            "estimate_p05_sat_kvb": None, "estimate_median_sat_kvb": None,
+            "estimate_p95_sat_kvb": None,
+            "primary_underestimate": self.classifications["underestimate"],
+            "primary_within_band": self.classifications["within_band"],
+            "primary_overestimate": self.classifications["overestimate"],
+            "primary_underestimate_pct": pct(self.classifications["underestimate"], evaluated),
+            "primary_within_band_pct": pct(self.classifications["within_band"], evaluated),
+            "primary_overestimate_pct": pct(self.classifications["overestimate"], evaluated),
+            "tip_balanced_underestimate_pct": tip_share("underestimate"),
+            "tip_balanced_within_band_pct": tip_share("within_band"),
+            "tip_balanced_overestimate_pct": tip_share("overestimate"),
+            "point_mean_bias_sat_kvb": self.point_error.mean(),
+            "point_median_bias_sat_kvb": None,
+            "point_mae_sat_kvb": self.point_error.mean_absolute(),
+            "point_rmse_sat_kvb": self.point_error.rmse(),
+            "point_median_absolute_percentage_error": None,
+            "point_p90_absolute_percentage_error": None,
+            "point_median_estimate_to_p50_ratio": None,
+            "point_median_log2_ratio": None, "point_p90_absolute_log2_error": None,
+            "average_mean_bias_sat_kvb": self.average_error.mean(),
+            "average_median_bias_sat_kvb": None,
+            "average_mae_sat_kvb": self.average_error.mean_absolute(),
+            "tip_consistent_sensitivity_evaluated": self.counts["tip_sensitivity"],
+            "horizon_evaluated": horizon,
+            "horizon_underestimate": self.horizon_classifications["underestimate"],
+            "horizon_within_band": self.horizon_classifications["within_band"],
+            "horizon_overestimate": self.horizon_classifications["overestimate"],
+            "horizon_underestimate_pct": pct(self.horizon_classifications["underestimate"], horizon),
+            "horizon_within_band_pct": pct(self.horizon_classifications["within_band"], horizon),
+            "horizon_overestimate_pct": pct(self.horizon_classifications["overestimate"], horizon),
+            "horizon_point_mean_bias_sat_kvb": self.horizon_error.mean(),
+            "horizon_point_mae_sat_kvb": self.horizon_error.mean_absolute(),
+            "horizon_point_rmse_sat_kvb": self.horizon_error.rmse(),
+            "horizon_point_median_absolute_percentage_error": None,
+        }
+
+    def availability(self, key: tuple[str, str, str, str]) -> dict[str, Any]:
+        output, mode, target, scope = key
+        return {
+            "output": output, "mode": mode, "requested_target": target,
+            "evaluation_scope": scope, "samples": self.counts["samples"],
+            "available": self.counts["available"],
+            "unavailable": self.counts["samples"] - self.counts["available"],
+            "warmup": self.counts["warmup"], "consistent": self.counts["consistent"],
+            "inconsistent": self.counts["inconsistent"],
+            "consistency_unknown": self.counts["consistency_unknown"],
+            "canonical_tip": self.counts["tip_canonical"],
+            "stale_tip": self.counts["tip_stale"],
+            "canonicality_unknown": self.counts["tip_unknown"],
+            "mature": self.counts["mature"],
+            "outcome_available": self.counts["outcome_available"],
+            "evaluated": self.counts["evaluated"],
+            "top_unavailable_reason": self.unavailable_reasons.most_common(1)[0][0] if self.unavailable_reasons else "",
+            "unavailable_reasons_json": json.dumps(self.unavailable_reasons, sort_keys=True),
+            "analysis_exclusion_reasons_json": json.dumps(self.exclusion_reasons, sort_keys=True),
+        }
+
+
+@dataclass
+class SelectionGroup:
+    counts: Counter[str] = field(default_factory=Counter)
+    reasons: Counter[str] = field(default_factory=Counter)
+    estimators: Counter[str] = field(default_factory=Counter)
+    differences: list[float] = field(default_factory=list)
+
+    def add(self, row: Mapping[str, Any]) -> None:
+        self.counts["samples"] += 1
+        self.counts["selection_success"] += int(bool(row.get("selection_success")))
+        self.reasons[str(row.get("selection_reason") or "missing")] += 1
+        self.estimators[str(row.get("selected_estimator") or "missing")] += 1
+        for name, predicate in (
+            ("fee_floor_applied", row.get("fee_floor_applied") is True),
+            ("diagnostics_consistent", row.get("selection_diagnostics_consistent") is True),
+            ("diagnostics_inconsistent", row.get("selection_diagnostics_consistent") is False),
+            ("selected_rate_inconsistent", row.get("selection_rate_consistent") is False),
+            ("selected_estimator_inconsistent", row.get("selection_estimator_consistent") is False),
+        ):
+            self.counts[name] += int(predicate)
+        block = row.get("block_policy_estimate_raw_sat_kvb")
+        mempool = row.get("mempool_policy_estimate_raw_sat_kvb")
+        if isinstance(block, decimal.Decimal) and isinstance(mempool, decimal.Decimal):
+            self.differences.append(float(mempool - block))
+
+    def result(self, key: tuple[str, str]) -> dict[str, Any]:
+        mode, target = key
+        return {
+            "mode": mode, "requested_target": target, "samples": self.counts["samples"],
+            "selection_success": self.counts["selection_success"],
+            "block_policy_selected": self.estimators["block_policy"],
+            "mempool_policy_selected": self.estimators["mempool_policy"],
+            **{name: self.reasons[name] for name in (
+                "block_policy_lower", "mempool_policy_lower", "block_policy_tie",
+                "block_policy_error", "mempool_policy_error", "both_estimators_error")},
+            **{name: self.counts[name] for name in (
+                "fee_floor_applied", "diagnostics_consistent", "diagnostics_inconsistent",
+                "selected_rate_inconsistent", "selected_estimator_inconsistent")},
+            "median_mempool_minus_block_sat_kvb": quantile(self.differences, 0.5),
+            "selection_reasons_json": json.dumps(self.reasons, sort_keys=True),
+        }
+
+
+@dataclass
+class PairGroup:
+    counts: Counter[str] = field(default_factory=Counter)
+    difference: RunningNumbers = field(default_factory=RunningNumbers)
+
+    def add(self, left: Mapping[str, Any], right: Mapping[str, Any]) -> None:
+        self.counts["sample_pairs"] += 1
+        if not (left.get("available") and right.get("available")):
+            return
+        self.counts["both_available"] += 1
+        difference = float(right["estimate_sat_kvb"] - left["estimate_sat_kvb"])
+        self.difference.add(difference)
+        if math.isclose(difference, 0.0, abs_tol=1e-12):
+            self.counts["equal"] += 1
+        elif difference > 0:
+            self.counts["left_lower"] += 1
+        else:
+            self.counts["right_lower"] += 1
+        if left.get("returned_target") != right.get("returned_target"):
+            return
+        self.counts["same_returned_horizon"] += 1
+        if not (left.get("analysis_included") and right.get("analysis_included")):
+            return
+        self.counts["accuracy_pairs"] += 1
+        left_error = float(left["point_absolute_error_sat_kvb"])
+        right_error = float(right["point_absolute_error_sat_kvb"])
+        if math.isclose(left_error, right_error, rel_tol=1e-12, abs_tol=1e-12):
+            self.counts["accuracy_ties"] += 1
+        elif left_error < right_error:
+            self.counts["left_accuracy_wins"] += 1
+        else:
+            self.counts["right_accuracy_wins"] += 1
+
+    def result(self, key: tuple[str, str, str, str, str]) -> dict[str, Any]:
+        left, right, mode, target, scope = key
+        return {
+            "left_output": left, "right_output": right, "mode": mode,
+            "requested_target": target, "evaluation_scope": scope,
+            **{name: self.counts[name] for name in (
+                "sample_pairs", "both_available", "same_returned_horizon", "accuracy_pairs",
+                "left_lower", "equal", "right_lower")},
+            "mean_right_minus_left_sat_kvb": self.difference.mean(),
+            "median_right_minus_left_sat_kvb": None,
+            **{name: self.counts[name] for name in (
+                "left_accuracy_wins", "accuracy_ties", "right_accuracy_wins")},
+        }
+
+
+def load_summary_inputs(input_path: Path, strict: bool) -> tuple[LoadResult, Path]:
+    """Load small supporting streams while leaving estimates on disk."""
+    if not input_path.is_dir():
+        raise AnalysisError("--summary-only requires a collector run directory")
+    estimate_path = input_path / "estimates.jsonl"
+    if not estimate_path.is_file():
+        raise AnalysisError(f"missing estimates stream: {estimate_path}")
+    result = LoadResult(paths=[estimate_path])
+    ordinal = 0
+    for name in EXPECTED_INPUT_FILES[1:]:
+        path = input_path / name
+        if not path.is_file():
+            continue
+        result.paths.append(path)
+        ordinal = read_jsonl(path, result, ordinal)
+    if strict and (
+        result.counters["malformed_lines"]
+        or result.counters["truncated_final_lines"]
+        or result.counters["unsupported_schema_records"]
+    ):
+        raise AnalysisError("strict input validation failed in supporting streams")
+    return result, estimate_path
+
+
+def iter_estimate_sources(
+    path: Path,
+    load: LoadResult,
+    strict: bool,
+    expected_experiment_id: str | None,
+) -> Iterable[SourceRecord]:
+    """Parse and deduplicate estimates one line at a time."""
+    seen_keys: set[Any] = set()
+    observed_experiments: set[str] = set()
+    with path.open("rb") as source:
+        for line_number, raw_line in enumerate(source, start=1):
+            load.counters["physical_lines"] += 1
+            if not raw_line.strip():
+                load.counters["blank_lines"] += 1
+                continue
+            try:
+                value = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                category = "truncated_final_lines" if not raw_line.endswith((b"\n", b"\r")) else "malformed_lines"
+                load.counters[category] += 1
+                load.issues.append(Issue(category, path.name, line_number, str(exc)))
+                if strict:
+                    raise AnalysisError(f"strict input validation rejected {path.name}:{line_number}")
+                continue
+            if not isinstance(value, dict):
+                load.counters["non_object_records"] += 1
+                if strict:
+                    raise AnalysisError(f"strict input validation rejected non-object {path.name}:{line_number}")
+                continue
+            schema = record_schema(value)
+            if schema is not None and schema not in SUPPORTED_INPUT_SCHEMA_VERSIONS:
+                load.counters["unsupported_schema_records"] += 1
+                if strict:
+                    raise AnalysisError(f"unsupported schema at {path.name}:{line_number}")
+                continue
+            if schema is None:
+                load.counters["missing_schema_records"] += 1
+            actual_id = value.get("experiment_id")
+            if actual_id is not None:
+                actual_text = str(actual_id)
+                observed_experiments.add(actual_text)
+                if expected_experiment_id is not None and actual_text != expected_experiment_id:
+                    load.counters["experiment_id_mismatch_records"] += 1
+                    if strict:
+                        raise AnalysisError(f"experiment_id mismatch at {path.name}:{line_number}")
+                    continue
+                if expected_experiment_id is None and len(observed_experiments) > 1:
+                    raise AnalysisError("estimates contain multiple experiment_id values")
+            kind = record_type(value, "estimate")
+            if not (
+                kind in {"estimate", "fee_estimate", "estimate_sample", "sample", "rpc_estimate"}
+                or "result" in value
+                or "diagnostics" in value
+            ):
+                continue
+            record = SourceRecord(value, path.name, line_number, line_number)
+            key = estimate_key(record)
+            if key is not None and key in seen_keys:
+                load.counters["estimate_semantic_duplicates"] += 1
+                continue
+            if key is not None:
+                seen_keys.add(key)
+            load.counters["accepted_records"] += 1
+            yield record
+
+
+def stream_group_keys(row: Mapping[str, Any]) -> list[tuple[str, str, str, str]]:
+    output = str(row.get("output", ""))
+    mode = str(row.get("mode", ""))
+    target = str(row.get("requested_target", ""))
+    scope = str(row.get("evaluation_scope", "native_target"))
+    keys = [(output, mode, target, scope)]
+    if not row.get("aggregation_duplicate"):
+        keys.extend(((output, mode, "ALL", scope), (output, "ALL", "ALL", scope)))
+    return keys
+
+
+def streaming_quality_rows(
+    load: LoadResult,
+    quality: Counter[str],
+    blocks: Mapping[str, Mapping[str, Any]],
+    chain_metadata: Mapping[str, Any],
+    node_count: int,
+    collector_error_count: int,
+) -> list[dict[str, Any]]:
+    metrics: list[tuple[str, Any, str]] = [
+        (f"input.{name}", value, "") for name, value in sorted(load.counters.items())
+    ]
+    metrics.extend([
+        ("estimates.samples", quality["samples"], "one row per RPC call"),
+        ("estimates.output_rows", quality["score_rows"], "output-specific requested/native-horizon rows"),
+        ("estimates.snapshot_consistent", quality["snapshot_consistent"], ""),
+        ("estimates.snapshot_inconsistent", quality["snapshot_inconsistent"], ""),
+        ("estimates.snapshot_consistency_unknown", quality["snapshot_consistency_unknown"], ""),
+        ("estimates.selection_diagnostic_mismatch", quality["selection_diagnostic_mismatch"], ""),
+        ("estimates.selection_rate_mismatch", quality["selection_rate_mismatch"], ""),
+        ("estimates.selection_estimator_mismatch", quality["selection_estimator_mismatch"], ""),
+        ("estimates.fee_floor_node_mismatch", quality["fee_floor_node_mismatch"], ""),
+        ("rates.exact_fraction", quality["rate_exact_fraction"], "preferred normalization source"),
+        ("rates.collector_normalized", quality["rate_collector_normalized_sat_kvb"], ""),
+        ("rates.rounded_rpc_fallback", quality["rate_rounded_rpc_btc_kvb"], ""),
+        ("outcomes.canonical_sample_tips", quality["tip_canonical"], ""),
+        ("outcomes.stale_sample_tips", quality["tip_stale"], "excluded"),
+        ("outcomes.unknown_sample_tip_canonicality", quality["tip_unknown"], "excluded"),
+        ("outcomes.not_mature", quality["not_mature"], ""),
+        ("outcomes.missing_target_block_stats", quality["missing_target_stats"], ""),
+        ("outcomes.analysis_included", quality["included"], ""),
+        ("blocks.observed", len(blocks), ""),
+        ("blocks.canonical", sum(block.get("is_canonical") is True for block in blocks.values()), ""),
+        ("blocks.stale", chain_metadata.get("stale_blocks", 0), ""),
+        ("blocks.canonical_missing_primary_percentiles", sum(
+            block.get("is_canonical") is True
+            and any(block.get(name) is None for name in ("p10_sat_kvb", "p50_sat_kvb", "p75_sat_kvb"))
+            for block in blocks.values()), ""),
+        ("chain.reorg_events", chain_metadata.get("reorg_events", 0), ""),
+        ("chain.cycle_detected", int(bool(chain_metadata.get("chain_cycle_detected"))), "must be zero"),
+        ("node.samples", node_count, ""),
+        ("collector.errors", collector_error_count, "see collector errors stream"),
+        ("input.issues", len(load.issues), ""),
+    ])
+    for issue_name, count in Counter(issue.category for issue in load.issues).most_common():
+        metrics.append((f"issue.{issue_name}", count, ""))
+    return [{"metric": name, "count": count, "detail": detail} for name, count, detail in metrics]
+
+
+def run_summary_only(
+    args: argparse.Namespace,
+    input_path: Path,
+    output_dir: Path,
+) -> tuple[int, int]:
+    load, estimate_path = load_summary_inputs(input_path, args.strict_input)
+    manifest, run_state = input_metadata(input_path, load)
+    experiment_id = filter_experiment_records(load, manifest, args.strict_input)
+    if experiment_id is None and manifest and manifest.get("experiment_id"):
+        experiment_id = str(manifest["experiment_id"])
+
+    node_rows = normalize_node_samples(load)
+    node_by_batch = {
+        str(row["batch_id"]): row for row in node_rows if row.get("batch_id") not in {None, ""}
+    }
+    collector_error_count = len(load.records.get("errors.jsonl", []))
+    blocks, canonical_by_height, tip_events, chain_metadata = build_chain(load, [])
+    canonical_blocks = sorted(
+        blocks.values(),
+        key=lambda row: (row.get("height") if row.get("height") is not None else -1, str(row.get("block_hash"))),
+    )
+    # Normalized node and block rows now own everything needed below. Drop
+    # the parsed supporting JSON before streaming the much larger estimate
+    # file so the allocator can reuse that memory.
+    load.records.clear()
+
+    groups: dict[tuple[str, str, str, str], StreamGroup] = defaultdict(StreamGroup)
+    selections: dict[tuple[str, str], SelectionGroup] = defaultdict(SelectionGroup)
+    pairs: dict[tuple[str, str, str, str, str], PairGroup] = defaultdict(PairGroup)
+    daily: dict[tuple[str, str, str], Counter[str]] = defaultdict(Counter)
+    quality: Counter[str] = Counter()
+    native_mempool_seen: set[tuple[Any, ...]] = set()
+    started = time.monotonic()
+
+    for source in iter_estimate_sources(
+        estimate_path, load, args.strict_input, experiment_id
+    ):
+        wide, outputs = normalize_estimate(source)
+        node = node_by_batch.get(str(wide.get("batch_id", "")))
+        attach_node_context([wide], outputs, [node] if node is not None else [])
+        refresh_wide_validity([wide], outputs)
+        quality["samples"] += 1
+        snapshot = wide.get("snapshot_consistent")
+        quality["snapshot_consistent" if snapshot is True else "snapshot_inconsistent" if snapshot is False else "snapshot_consistency_unknown"] += 1
+        quality["selection_diagnostic_mismatch"] += int(wide.get("selection_diagnostics_consistent") is False)
+        quality["selection_rate_mismatch"] += int(wide.get("selection_rate_consistent") is False)
+        quality["selection_estimator_mismatch"] += int(wide.get("selection_estimator_consistent") is False)
+        quality["fee_floor_node_mismatch"] += int(wide.get("fee_floor_node_consistent") is False)
+        selection_key = (str(wide.get("mode", "")), str(wide.get("requested_target", "")))
+        selections[selection_key].add(wide)
+
+        scored_by_scope: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        for output_row in outputs:
+            requested_target = as_int(output_row.get("requested_target"))
+            native_target = as_int(output_row.get("returned_target"))
+            for scope, target in (("requested_target", requested_target), ("native_target", native_target)):
+                scored = score_output(
+                    output_row, blocks, canonical_by_height, chain_metadata,
+                    args.include_warmup, args.include_inconsistent,
+                    evaluation_scope=scope, evaluation_target=target,
+                )
+                duplicate = False
+                if scored.get("output") == "mempool_policy_raw" and scope == "native_target":
+                    duplicate_key = (
+                        scored.get("batch_id") or scored.get("timestamp_utc"),
+                        scored.get("mode"), scored.get("native_returned_target"),
+                    )
+                    duplicate = duplicate_key in native_mempool_seen
+                    native_mempool_seen.add(duplicate_key)
+                scored["aggregation_duplicate"] = duplicate
+                quality["score_rows"] += 1
+                quality[f"rate_{scored.get('rate_source')}"] += 1
+                quality[f"tip_{scored.get('canonical_tip_status')}"] += 1
+                quality["not_mature"] += int(not scored.get("mature"))
+                quality["missing_target_stats"] += int(bool(scored.get("mature")) and not scored.get("outcome_available"))
+                quality["included"] += int(bool(scored.get("analysis_included")))
+                for key in stream_group_keys(scored):
+                    groups[key].add(scored)
+                scored_by_scope[scope][str(scored.get("output"))] = scored
+
+                if scored.get("output") == "returned_after_floor" and scope == "requested_target":
+                    day = str(scored.get("timestamp_utc") or "")[:10]
+                    if day:
+                        for day_key in ((day, str(scored.get("mode", "")), str(scored.get("requested_target", ""))), (day, "ALL", "ALL")):
+                            values = daily[day_key]
+                            values["samples"] += 1
+                            if scored.get("analysis_included"):
+                                values["evaluated"] += 1
+                                values[str(scored.get("primary_classification"))] += 1
+
+        for scope, by_output in scored_by_scope.items():
+            for left, right in PAIRWISE_OUTPUTS:
+                if left in by_output and right in by_output:
+                    pair_key = (left, right, str(wide.get("mode", "")), str(wide.get("requested_target", "")), scope)
+                    pairs[pair_key].add(by_output[left], by_output[right])
+
+        if quality["samples"] % 10_000 == 0:
+            elapsed = max(time.monotonic() - started, 0.001)
+            rate = quality["samples"] / elapsed
+            print(
+                f"analyzed {quality['samples']:,} estimate calls "
+                f"({rate:,.0f}/s, {estimate_path.stat().st_size / 1_000_000_000:.2f} GB input)",
+                flush=True,
+            )
+
+    summary_rows = [groups[key].summary(key) for key in sorted(groups)]
+    availability_rows = [groups[key].availability(key) for key in sorted(groups)]
+    selection_rows = [selections[key].result(key) for key in sorted(selections)]
+    pairwise_rows = [pairs[key].result(key) for key in sorted(pairs)]
+    daily_rows = []
+    for (day, mode, target), values in sorted(daily.items()):
+        evaluated = values["evaluated"]
+        daily_rows.append({
+            "date_utc": day, "mode": mode, "requested_target": target,
+            "samples": values["samples"], "evaluated": evaluated,
+            "underestimate": values["underestimate"], "within_band": values["within_band"],
+            "overestimate": values["overestimate"],
+            "underestimate_pct": pct(values["underestimate"], evaluated),
+            "within_band_pct": pct(values["within_band"], evaluated),
+            "overestimate_pct": pct(values["overestimate"], evaluated),
+        })
+    quality_rows = streaming_quality_rows(
+        load, quality, blocks, chain_metadata, len(node_rows), collector_error_count
+    )
+
+    write_csv(output_dir / "summary_by_target.csv", summary_rows, ("output", "mode", "requested_target", "evaluation_scope"))
+    write_csv(output_dir / "availability.csv", availability_rows, ("output", "mode", "requested_target", "evaluation_scope"))
+    write_csv(output_dir / "selection_summary.csv", selection_rows, ("mode", "requested_target"))
+    write_csv(output_dir / "pairwise_comparison.csv", pairwise_rows, ("left_output", "right_output", "mode", "requested_target", "evaluation_scope"))
+    write_csv(output_dir / "daily_summary.csv", daily_rows, ("date_utc", "mode", "requested_target"))
+    write_csv(output_dir / "canonical_blocks.csv", canonical_blocks, ("height", "block_hash", "previous_block_hash", "is_canonical"))
+    write_csv(output_dir / "tip_events.csv", tip_events, ("timestamp_utc", "event_type", "new_tip_height", "new_tip_hash"))
+    write_csv(output_dir / "node_samples.csv", node_rows, ("timestamp_utc", "batch_id"))
+    write_csv(output_dir / "data_quality.csv", quality_rows, ("metric", "count", "detail"))
+
+    settings = {
+        "include_warmup": args.include_warmup,
+        "include_inconsistent": args.include_inconsistent,
+        "strict_input": args.strict_input,
+        "summary_only": True,
+    }
+    atomic_text(output_dir / "analysis_report.md", build_report(
+        input_path, summary_rows, selection_rows, quality_rows, chain_metadata, settings
+    ))
+    files = []
+    for path in load.paths:
+        item: dict[str, Any] = {"name": path.name, "bytes": path.stat().st_size}
+        if path == estimate_path:
+            item["sha256"] = None
+            item["sha256_skipped"] = "summary-only avoids a second pass over the large estimates stream"
+        else:
+            item["sha256"] = sha256_file(path)
+        files.append(item)
+    analysis_manifest = {
+        "analysis_schema_version": ANALYZER_SCHEMA_VERSION,
+        "generated_utc": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "input_path": str(input_path), "output_path": str(output_dir),
+        "experiment_id": experiment_id, "settings": settings,
+        "collector_manifest": manifest, "collector_run_state": run_state,
+        "chain": chain_metadata,
+        "counts": {
+            "estimate_calls": quality["samples"], "score_rows": quality["score_rows"],
+            "included_score_rows": quality["included"], "observed_blocks": len(blocks),
+            "node_samples": len(node_rows), "input_issues": len(load.issues),
+        },
+        "input_files": files,
+    }
+    atomic_text(output_dir / "analysis_manifest.json", json.dumps(
+        analysis_manifest, indent=2, sort_keys=True, default=str
+    ) + "\n")
+    return quality["samples"], quality["included"]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -2113,6 +2709,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-warmup", action="store_true")
     parser.add_argument("--include-inconsistent", action="store_true")
     parser.add_argument("--strict-input", action="store_true")
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help=(
+            "stream estimates with bounded memory and write summary results; "
+            "omit normalized_estimates.csv, scores.csv, and quantile-only metrics"
+        ),
+    )
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -2208,6 +2812,15 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        if args.summary_only:
+            estimate_calls, included_rows = run_summary_only(
+                args, input_path, output_dir
+            )
+            print(
+                f"analysis complete: {estimate_calls} estimate calls, "
+                f"{included_rows} eligible score rows; outputs in {output_dir}"
+            )
+            return 0
         load = load_inputs(input_path, args.strict_input)
         manifest, run_state = input_metadata(input_path, load)
         experiment_id = filter_experiment_records(load, manifest, args.strict_input)
@@ -2350,6 +2963,7 @@ def main() -> int:
             "include_warmup": args.include_warmup,
             "include_inconsistent": args.include_inconsistent,
             "strict_input": args.strict_input,
+            "summary_only": False,
         }
         report = build_report(
             input_path,

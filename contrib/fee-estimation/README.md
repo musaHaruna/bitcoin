@@ -108,8 +108,13 @@ python3 contrib/fee-estimation/collect_fee_estimates.py \
 
 ## Analyze a completed run
 
+For a long run, use the bounded-memory summary mode. It reads
+`estimates.jsonl` once and does not keep the per-sample score rows in memory:
+
 ```sh
-python3 contrib/fee-estimation/analyze_fee_estimates.py "$FEE_RUN_DIR"
+python3 contrib/fee-estimation/analyze_fee_estimates.py \
+  "$FEE_RUN_DIR" \
+  --summary-only
 ```
 
 This writes an `analysis/` directory. Start with:
@@ -118,9 +123,14 @@ This writes an `analysis/` directory. Start with:
 * `data_quality.csv` — malformed input, inconsistent snapshots, incomplete
   outcomes, and other exclusions.
 * `summary_by_target.csv` — accuracy summaries by output, mode, and target.
+* `daily_summary.csv` — daily results for the returned fee estimate.
 * `pairwise_comparison.csv` — comparison of the two estimators, selection,
   and final returned rate.
-* `scores.csv` — the detailed rows used in the summaries.
+
+Summary mode computes counts, percentages, means, MAE, and RMSE exactly. It
+leaves quantile-only columns blank and skips `normalized_estimates.csv` and
+`scores.csv`, which are expensive for a large run. For a small run that needs
+every detailed row and quantile, omit `--summary-only`.
 
 By default I exclude warmup estimates, inconsistent snapshots, reorged tips,
 and estimates that do not yet have a target-block outcome. I can use

@@ -368,6 +368,44 @@ class AnalyzerEndToEndTest(unittest.TestCase):
         )
         self.assertEqual(analysis_manifest["chain"]["reorg_events"], 1)
 
+        summary_output = self.root / "summary-analysis"
+        summarized = subprocess.run(
+            [
+                sys.executable,
+                str(ANALYZER),
+                str(self.input_dir),
+                "--output-dir",
+                str(summary_output),
+                "--summary-only",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(summarized.returncode, 0, summarized.stderr)
+        self.assertTrue((summary_output / "analysis_report.md").is_file())
+        self.assertTrue((summary_output / "daily_summary.csv").is_file())
+        self.assertFalse((summary_output / "scores.csv").exists())
+        self.assertFalse((summary_output / "normalized_estimates.csv").exists())
+        with (summary_output / "summary_by_target.csv").open(
+            encoding="utf-8", newline=""
+        ) as handle:
+            summaries = list(csv.DictReader(handle))
+        selected_summary = next(
+            row
+            for row in summaries
+            if row["output"] == "selected_raw"
+            and row["mode"] == "economical"
+            and row["requested_target"] == "2"
+            and row["evaluation_scope"] == "requested_target"
+        )
+        self.assertEqual(selected_summary["evaluated"], "1")
+        self.assertEqual(selected_summary["primary_within_band"], "1")
+        summary_manifest = json.loads(
+            (summary_output / "analysis_manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertTrue(summary_manifest["settings"]["summary_only"])
+
 
 if __name__ == "__main__":
     unittest.main()
