@@ -91,6 +91,7 @@ EXTENDED_SCRIPTS = [
     'feature_dbcrash.py',
     'feature_index_prune.py',
     'feature_utxo_abort_on_error.py',
+    'feature_txindex_iterator_error.py',
 ]
 
 # Special script to run each bench sanity check
