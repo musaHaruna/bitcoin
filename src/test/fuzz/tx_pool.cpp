@@ -324,7 +324,7 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool_standard)
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(tx_pool_.get());
 
     node::KernelMempool mempool_adapter{tx_pool};
-    chainstate.SetMempool(&tx_pool, &mempool_adapter);
+    chainstate.SetMempool(&mempool_adapter);
 
     bool accepted_transaction{false};
 
@@ -489,7 +489,7 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool_standard)
     Finish(fuzzed_data_provider, tx_pool, chainstate);
 
     // Restore the fixture before the per-input adapter and pool are destroyed.
-    chainstate.SetMempool(node.mempool.get(), node.kernel_mempool.get());
+    chainstate.SetMempool(node.kernel_mempool.get());
 }
 
 FUZZ_TARGET(tx_pool, .init = initialize_tx_pool)
@@ -517,7 +517,7 @@ FUZZ_TARGET(tx_pool, .init = initialize_tx_pool)
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(tx_pool_.get());
 
     node::KernelMempool mempool_adapter{tx_pool};
-    chainstate.SetMempool(&tx_pool, &mempool_adapter);
+    chainstate.SetMempool(&mempool_adapter);
 
     bool accepted_transaction{false};
 
@@ -559,6 +559,6 @@ FUZZ_TARGET(tx_pool, .init = initialize_tx_pool)
     Finish(fuzzed_data_provider, tx_pool, chainstate);
 
     // Restore the fixture before the per-input adapter and pool are destroyed.
-    chainstate.SetMempool(node.mempool.get(), node.kernel_mempool.get());
+    chainstate.SetMempool(node.kernel_mempool.get());
 }
 } // namespace

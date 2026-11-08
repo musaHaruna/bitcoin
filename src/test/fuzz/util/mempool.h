@@ -9,8 +9,6 @@
 #include <kernel/mempool_interface.h>
 #include <validation.h>
 
-#include <cassert>
-
 class CTransaction;
 class CTxMemPool;
 class FuzzedDataProvider;
@@ -18,11 +16,9 @@ class FuzzedDataProvider;
 class DummyChainState final : public Chainstate
 {
 public:
-    void SetMempool(CTxMemPool* pool, kernel::Mempool* adapter)
+    void SetMempool(kernel::Mempool* mempool)
     {
-        assert((pool == nullptr) == (adapter == nullptr));
-        m_mempool = pool;
-        m_kernel_mempool = adapter;
+        m_mempool = mempool;
     }
 };
 

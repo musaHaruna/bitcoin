@@ -29,7 +29,6 @@
 #include <script/verify_flags.h>
 #include <sync.h>
 #include <txdb.h>
-#include <txmempool.h>
 #include <uint256.h>
 #include <util/byte_units.h>
 #include <util/check.h>
@@ -54,12 +53,10 @@
 #include <vector>
 
 class Chainstate;
-class CTxMemPool;
 class ChainstateManager;
 struct ChainTxData;
 class DisconnectedBlockTransactions;
 struct PrecomputedTransactionData;
-struct LockPoints;
 struct AssumeutxoData;
 namespace kernel {
 struct ChainstateRole;
@@ -337,11 +334,10 @@ protected:
      */
     Mutex m_chainstate_mutex;
 
-    //! Optional mempool that is kept in sync with the chain.
+    //! Optional, non-owning mempool interface; its owner must outlive this chainstate.
+    //! The attached mempool is kept in sync with the chain.
     //! Only the active chainstate has a mempool.
-    CTxMemPool* m_mempool;
-    //! Interface for the same pool, kept alongside the concrete pointer until callers are migrated.
-    kernel::Mempool* m_kernel_mempool;
+    kernel::Mempool* m_mempool;
 
     //! Manages the UTXO set, which is a reflection of the contents of `m_chain`.
     std::unique_ptr<CoinsViews> m_coins_views;
@@ -371,11 +367,10 @@ public:
     ChainstateManager& m_chainman;
 
     explicit Chainstate(
-        CTxMemPool* mempool,
+        kernel::Mempool* mempool,
         node::BlockManager& blockman,
         ChainstateManager& chainman,
-        std::optional<uint256> from_snapshot_blockhash = std::nullopt,
-        kernel::Mempool* kernel_mempool = nullptr);
+        std::optional<uint256> from_snapshot_blockhash = std::nullopt);
 
     //! Return path to chainstate leveldb directory.
     fs::path StoragePath() const;
@@ -490,7 +485,7 @@ public:
     }
 
     //! @returns A pointer to the mempool.
-    CTxMemPool* GetMempool()
+    kernel::Mempool* GetMempool()
     {
         return m_mempool;
     }
@@ -574,7 +569,7 @@ public:
                       CCoinsViewCache& view, bool fJustCheck = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     // Apply the effects of a block disconnection on the UTXO set.
-    bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_kernel_mempool->GetMutex());
+    bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->GetMutex());
 
     // Manual block validity manipulation:
     /** Mark a block as precious and reorganize.
@@ -633,9 +628,9 @@ public:
     const CBlockIndex* GetLastFlushedBlock() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main) { return m_last_flushed_block; }
 
     //! Indirection necessary to make lock annotations work with an optional mempool.
-    RecursiveMutex* MempoolMutex() const LOCK_RETURNED(m_kernel_mempool->GetMutex())
+    RecursiveMutex* MempoolMutex() const LOCK_RETURNED(m_mempool->GetMutex())
     {
-        return m_kernel_mempool ? &m_kernel_mempool->GetMutex() : nullptr;
+        return m_mempool ? &m_mempool->GetMutex() : nullptr;
     }
 
     //! Return the [start, end] (inclusive) of block heights we can prune.
@@ -644,13 +639,13 @@ public:
     std::pair<int, int> GetPruneRange(int last_height_can_prune) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 protected:
-    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex& index_most_work, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, std::vector<ConnectedBlock>& connected_blocks) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_kernel_mempool->GetMutex());
+    bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex& index_most_work, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, std::vector<ConnectedBlock>& connected_blocks) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->GetMutex());
     bool ConnectTip(
         BlockValidationState& state,
         CBlockIndex* pindexNew,
         std::shared_ptr<const CBlock> block_to_connect,
         std::vector<ConnectedBlock>& connected_blocks,
-        DisconnectedBlockTransactions& disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_kernel_mempool->GetMutex());
+        DisconnectedBlockTransactions& disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->GetMutex());
 
     void InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     CBlockIndex* FindMostWorkChain() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -675,7 +670,7 @@ protected:
      */
     void MaybeUpdateMempoolForReorg(
         DisconnectedBlockTransactions& disconnectpool,
-        bool fAddToMempool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_kernel_mempool->GetMutex());
+        bool fAddToMempool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->GetMutex());
 
     /** Check warning conditions and do some notifications on new chain tip set. */
     void UpdateTip(const CBlockIndex* pindexNew)
@@ -892,7 +887,7 @@ public:
     //!
     //! @param[in] mempool              The mempool to pass to the chainstate
     //                                  constructor
-    Chainstate& InitializeChainstate(CTxMemPool* mempool, kernel::Mempool* kernel_mempool = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    Chainstate& InitializeChainstate(kernel::Mempool* mempool) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Construct and activate a Chainstate on the basis of UTXO snapshot data.
     //!

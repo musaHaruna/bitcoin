@@ -23,14 +23,13 @@
 #include <kernel/chainparams.h>
 #include <kernel/coinstats.h>
 #include <kernel/disconnected_transactions.h>
-#include <kernel/mempool_entry.h>
+#include <kernel/mempool_events.h>
 #include <kernel/messagestartchars.h>
 #include <kernel/notifications_interface.h>
 #include <kernel/types.h>
 #include <kernel/warning.h>
 #include <logging/timer.h>
 #include <node/blockstorage.h>
-#include <node/mempool_accept.h>
 #include <node/utxo_snapshot.h>
 #include <policy/ephemeral_policy.h>
 #include <policy/policy.h>
@@ -46,7 +45,6 @@
 #include <signet.h>
 #include <tinyformat.h>
 #include <txdb.h>
-#include <txmempool.h>
 #include <uint256.h>
 #include <undo.h>
 #include <util/byte_units.h>
@@ -56,7 +54,6 @@
 #include <util/hasher.h>
 #include <util/log.h>
 #include <util/moneystr.h>
-#include <util/rbf.h>
 #include <util/result.h>
 #include <util/signalinterrupt.h>
 #include <util/strencodings.h>
@@ -145,7 +142,7 @@ const CBlockIndex* Chainstate::FindForkInGlobalIndex(const CBlockLocator& locato
 
 void Chainstate::MaybeUpdateMempoolForReorg(DisconnectedBlockTransactions& disconnectpool, bool add_to_mempool)
 {
-    if (m_kernel_mempool) m_kernel_mempool->UpdateForReorg(*this, disconnectpool, add_to_mempool);
+    if (m_mempool) m_mempool->UpdateForReorg(*this, disconnectpool, add_to_mempool);
 }
 
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
@@ -178,21 +175,15 @@ void CoinsViews::InitCache(int32_t prevoutfetch_threads)
 }
 
 Chainstate::Chainstate(
-    CTxMemPool* mempool,
+    kernel::Mempool* mempool,
     BlockManager& blockman,
     ChainstateManager& chainman,
-    std::optional<uint256> from_snapshot_blockhash,
-    kernel::Mempool* kernel_mempool)
+    std::optional<uint256> from_snapshot_blockhash)
     : m_mempool(mempool),
-      m_kernel_mempool(kernel_mempool),
       m_blockman(blockman),
       m_chainman(chainman),
       m_assumeutxo(from_snapshot_blockhash ? Assumeutxo::UNVALIDATED : Assumeutxo::VALIDATED),
-      m_from_snapshot_blockhash(from_snapshot_blockhash)
-{
-    // During migration, both pointers must be present or both absent.
-    assert((m_mempool == nullptr) == (m_kernel_mempool == nullptr));
-}
+      m_from_snapshot_blockhash(from_snapshot_blockhash) {}
 
 fs::path Chainstate::StoragePath() const
 {
@@ -1079,7 +1070,7 @@ CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState()
     AssertLockHeld(::cs_main);
     return this->GetCoinsCacheSizeState(
         m_coinstip_cache_size_bytes,
-        m_kernel_mempool ? m_kernel_mempool->MaxSizeBytes() : 0);
+        m_mempool ? m_mempool->MaxSizeBytes() : 0);
 }
 
 CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState(
@@ -1087,7 +1078,7 @@ CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState(
     size_t max_mempool_size_bytes)
 {
     AssertLockHeld(::cs_main);
-    const int64_t nMempoolUsage = m_kernel_mempool ? m_kernel_mempool->DynamicMemoryUsage() : 0;
+    const int64_t nMempoolUsage = m_mempool ? m_mempool->DynamicMemoryUsage() : 0;
     int64_t cacheSize = CoinsTip().DynamicMemoryUsage();
     int64_t nTotalSpace =
         max_coins_cache_size_bytes + std::max<int64_t>(int64_t(max_mempool_size_bytes) - nMempoolUsage, 0);
@@ -1314,7 +1305,7 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
 
     // New best block
     if (m_mempool) {
-        m_kernel_mempool->AddTransactionsUpdated(1);
+        m_mempool->AddTransactionsUpdated(1);
     }
 
     std::vector<bilingual_str> warning_messages;
@@ -1346,7 +1337,7 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
 bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool)
 {
     AssertLockHeld(cs_main);
-    if (m_kernel_mempool) AssertLockHeld(m_kernel_mempool->GetMutex());
+    if (m_mempool) AssertLockHeld(m_mempool->GetMutex());
 
     CBlockIndex *pindexDelete = m_chain.Tip();
     assert(pindexDelete);
@@ -1392,7 +1383,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         // Save transactions to re-add to mempool at end of reorg. If any entries are evicted for
         // exceeding memory limits, remove them and their descendants from the mempool.
         for (auto&& evicted_tx : disconnectpool->AddTransactionsFromBlock(block.vtx)) {
-            m_kernel_mempool->RemoveRecursiveForReorg(*evicted_tx);
+            m_mempool->RemoveRecursiveForReorg(*evicted_tx);
         }
     }
 
@@ -1427,7 +1418,7 @@ bool Chainstate::ConnectTip(
     DisconnectedBlockTransactions& disconnectpool)
 {
     AssertLockHeld(cs_main);
-    if (m_kernel_mempool) AssertLockHeld(m_kernel_mempool->GetMutex());
+    if (m_mempool) AssertLockHeld(m_mempool->GetMutex());
 
     assert(pindexNew->pprev == m_chain.Tip());
     // Read block from disk.
@@ -1489,7 +1480,7 @@ bool Chainstate::ConnectTip(
     // Remove conflicting transactions from the mempool.
     std::vector<RemovedMempoolTransactionInfo> txs_removed_for_block;
     if (m_mempool) {
-        txs_removed_for_block = m_kernel_mempool->removeForBlock(block_to_connect->vtx);
+        txs_removed_for_block = m_mempool->removeForBlock(block_to_connect->vtx);
         disconnectpool.removeForBlock(block_to_connect->vtx);
     }
     // Update m_chain & related variables.
@@ -1609,7 +1600,7 @@ void Chainstate::PruneBlockIndexCandidates() {
 bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex& index_most_work, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, std::vector<ConnectedBlock>& connected_blocks)
 {
     AssertLockHeld(cs_main);
-    if (m_kernel_mempool) AssertLockHeld(m_kernel_mempool->GetMutex());
+    if (m_mempool) AssertLockHeld(m_mempool->GetMutex());
 
     const CBlockIndex* pindexOldTip = m_chain.Tip();
     const CBlockIndex* pindexFork = m_chain.FindFork(index_most_work);
@@ -1684,7 +1675,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex&
         // any disconnected transactions back to the mempool.
         MaybeUpdateMempoolForReorg(disconnectpool, true);
     }
-    if (m_kernel_mempool) m_kernel_mempool->check(this->CoinsTip(), this->m_chain.Height() + 1);
+    if (m_mempool) m_mempool->check(this->CoinsTip(), this->m_chain.Height() + 1);
 
     CheckForkWarningConditions();
 
@@ -3950,11 +3941,11 @@ double ChainstateManager::GetBackgroundVerificationProgress(const CBlockIndex& p
     return static_cast<double>(pindex.m_chain_tx_count) / static_cast<double>(target_block->m_chain_tx_count);
 }
 
-Chainstate& ChainstateManager::InitializeChainstate(CTxMemPool* mempool, kernel::Mempool* kernel_mempool)
+Chainstate& ChainstateManager::InitializeChainstate(kernel::Mempool* mempool)
 {
     AssertLockHeld(::cs_main);
     assert(m_chainstates.empty());
-    m_chainstates.emplace_back(std::make_unique<Chainstate>(mempool, m_blockman, *this, std::nullopt, kernel_mempool));
+    m_chainstates.emplace_back(std::make_unique<Chainstate>(mempool, m_blockman, *this));
     return *m_chainstates.back();
 }
 
@@ -4036,7 +4027,7 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
             return util::Error{Untranslated("A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo.")};
         }
 
-        auto mempool{CurrentChainstate().m_kernel_mempool};
+        auto mempool{CurrentChainstate().GetMempool()};
         if (mempool && !mempool->Empty()) {
             return util::Error{Untranslated("Can't activate a snapshot when mempool not empty")};
         }
@@ -4594,11 +4585,9 @@ Chainstate& ChainstateManager::AddChainstate(std::unique_ptr<Chainstate> chainst
 
     // Move the mempool pointers to the new active chainstate; the node still owns the pool.
     // Mempool is empty at this point because we're still in IBD.
-    assert(!prev_chainstate.m_kernel_mempool || prev_chainstate.m_kernel_mempool->Empty());
+    assert(!prev_chainstate.m_mempool || prev_chainstate.m_mempool->Empty());
     assert(!curr_chainstate.m_mempool);
     std::swap(curr_chainstate.m_mempool, prev_chainstate.m_mempool);
-    assert(!curr_chainstate.m_kernel_mempool);
-    std::swap(curr_chainstate.m_kernel_mempool, prev_chainstate.m_kernel_mempool);
     return curr_chainstate;
 }
 
@@ -4658,11 +4647,9 @@ bool ChainstateManager::DeleteChainstate(Chainstate& chainstate)
     }
     std::unique_ptr<Chainstate> prev_chainstate{Assert(RemoveChainstate(chainstate))};
     Chainstate& curr_chainstate{CurrentChainstate()};
-    assert(!prev_chainstate->m_kernel_mempool || prev_chainstate->m_kernel_mempool->Empty());
+    assert(!prev_chainstate->m_mempool || prev_chainstate->m_mempool->Empty());
     assert(!curr_chainstate.m_mempool);
     std::swap(curr_chainstate.m_mempool, prev_chainstate->m_mempool);
-    assert(!curr_chainstate.m_kernel_mempool);
-    std::swap(curr_chainstate.m_kernel_mempool, prev_chainstate->m_kernel_mempool);
     return true;
 }
 

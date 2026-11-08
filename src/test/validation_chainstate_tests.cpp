@@ -39,8 +39,7 @@ BOOST_FIXTURE_TEST_SUITE(validation_chainstate_tests, ChainTestingSetup)
 BOOST_AUTO_TEST_CASE(validation_chainstate_resize_caches)
 {
     ChainstateManager& manager = *Assert(m_node.chainman);
-    CTxMemPool& mempool = *Assert(m_node.mempool);
-    Chainstate& c1 = WITH_LOCK(cs_main, return manager.InitializeChainstate(&mempool, m_node.kernel_mempool.get()));
+    Chainstate& c1 = WITH_LOCK(cs_main, return manager.InitializeChainstate(m_node.kernel_mempool.get()));
     c1.InitCoinsDB(
         /*cache_size_bytes=*/8_MiB, /*in_memory=*/true, /*should_wipe=*/false);
     WITH_LOCK(::cs_main, c1.InitCoinsCache(8_MiB));

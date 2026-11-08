@@ -54,7 +54,7 @@ FUZZ_TARGET(validation_load_mempool, .init = initialize_validation_load_mempool)
 
     auto& chainstate{static_cast<DummyChainState&>(g_setup->m_node.chainman->ActiveChainstate())};
     node::KernelMempool mempool_adapter{pool};
-    chainstate.SetMempool(&pool, &mempool_adapter);
+    chainstate.SetMempool(&mempool_adapter);
 
     auto fuzzed_fopen = [&](const fs::path&, const char*) {
         return fuzzed_file_provider.open();
@@ -69,5 +69,5 @@ FUZZ_TARGET(validation_load_mempool, .init = initialize_validation_load_mempool)
     ObserveReachabilityGoal(load_success, MEMPOOL_LOAD_SUCCEEDS);
 
     // Restore the fixture before the per-input adapter and pool are destroyed.
-    chainstate.SetMempool(g_setup->m_node.mempool.get(), g_setup->m_node.kernel_mempool.get());
+    chainstate.SetMempool(g_setup->m_node.kernel_mempool.get());
 }

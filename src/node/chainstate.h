@@ -12,8 +12,6 @@
 #include <functional>
 #include <tuple>
 
-class CTxMemPool;
-
 namespace kernel {
 struct CacheSizes;
 } // namespace kernel
@@ -21,8 +19,7 @@ struct CacheSizes;
 namespace node {
 
 struct ChainstateLoadOptions {
-    CTxMemPool* mempool{nullptr};
-    kernel::Mempool* kernel_mempool{nullptr};
+    kernel::Mempool* mempool{nullptr};
     bool coins_db_in_memory{false};
     // Whether to wipe the chainstate database when loading it. If set, this
     // will cause the chainstate database to be rebuilt starting from genesis.

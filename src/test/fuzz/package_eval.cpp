@@ -253,7 +253,7 @@ FUZZ_TARGET(ephemeral_package_eval, .init = initialize_ephemeral_package_eval)
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(tx_pool_.get());
 
     node::KernelMempool mempool_adapter{tx_pool};
-    chainstate.SetMempool(&tx_pool, &mempool_adapter);
+    chainstate.SetMempool(&mempool_adapter);
 
     bool valid_package{false};
 
@@ -387,7 +387,7 @@ FUZZ_TARGET(ephemeral_package_eval, .init = initialize_ephemeral_package_eval)
     ObserveReachabilityGoal(valid_package, EPHEMERAL_PACKAGE_EVAL_PROCESSES_VALID_PACKAGE);
 
     // Restore the fixture before the per-input adapter and pool are destroyed.
-    chainstate.SetMempool(node.mempool.get(), node.kernel_mempool.get());
+    chainstate.SetMempool(node.kernel_mempool.get());
 }
 
 
@@ -415,7 +415,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_package_eval)
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(tx_pool_.get());
 
     node::KernelMempool mempool_adapter{tx_pool};
-    chainstate.SetMempool(&tx_pool, &mempool_adapter);
+    chainstate.SetMempool(&mempool_adapter);
 
     bool valid_package{false};
 
@@ -589,6 +589,6 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_package_eval)
     ObserveReachabilityGoal(valid_package, TX_PACKAGE_EVAL_PROCESSES_VALID_PACKAGE);
 
     // Restore the fixture before the per-input adapter and pool are destroyed.
-    chainstate.SetMempool(node.mempool.get(), node.kernel_mempool.get());
+    chainstate.SetMempool(node.kernel_mempool.get());
 }
 } // namespace

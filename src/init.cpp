@@ -1487,8 +1487,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
         }
     };
     node::ChainstateLoadOptions options;
-    options.mempool = Assert(node.mempool.get());
-    options.kernel_mempool = Assert(node.kernel_mempool.get());
+    options.mempool = Assert(node.kernel_mempool.get());
     options.wipe_chainstate_db = do_reindex || do_reindex_chainstate;
     options.prune = chainman.m_blockman.IsPruneMode();
     options.check_blocks = args.GetIntArg("-checkblocks", DEFAULT_CHECKBLOCKS);
@@ -2168,7 +2167,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             return;
         }
         // Load mempool from disk
-        if (auto* pool{chainman.ActiveChainstate().GetMempool()}) {
+        if (auto* pool{node.mempool.get()}) {
             const bool loaded{LoadMempool(*pool, ShouldPersistMempool(args) ? MempoolPath(args) : fs::path{}, chainman.ActiveChainstate(), {})};
             // A shutdown request sets m_interrupt and aborts the mempool load, which is not a
             // load failure, so only notify the fee estimator when the load actually failed.
