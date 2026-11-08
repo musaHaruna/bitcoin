@@ -20,10 +20,6 @@
 #include <kernel/cs_main.h> // IWYU pragma: export
 #include <kernel/mempool_interface.h>
 #include <node/blockstorage.h>
-#include <policy/feerate.h>
-#include <policy/mempool_accept_result.h>
-#include <policy/packages.h>
-#include <policy/policy.h>
 #include <script/script_error.h>
 #include <script/sigcache.h>
 #include <script/verify_flags.h>
@@ -56,6 +52,7 @@ class Chainstate;
 class ChainstateManager;
 struct ChainTxData;
 class DisconnectedBlockTransactions;
+class TxValidationState;
 struct PrecomputedTransactionData;
 struct AssumeutxoData;
 namespace kernel {

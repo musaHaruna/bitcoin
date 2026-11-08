@@ -68,6 +68,16 @@ bool CheckFinalTxAtTip(const CBlockIndex& active_chain_tip, const CTransaction& 
 }
 
 namespace {
+/* If STANDARD_SCRIPT_VERIFY_FLAGS doesn't cover a consensus flag,
+ * MemPoolAccept::PolicyScriptChecks may accept txs that violate the
+ * corresponding consensus rule, which would cause us to create invalid
+ * block templates.
+ */
+static_assert((CONSENSUS_SCRIPT_VERIFY_FLAGS & STANDARD_SCRIPT_VERIFY_FLAGS) == CONSENSUS_SCRIPT_VERIFY_FLAGS, "standard flags must be a superset of consensus flags");
+
+/* Check that there's no inconsistency with the policy/policy.h value */
+static_assert(CONSENSUS_SCRIPT_VERIFY_FLAGS == MANDATORY_SCRIPT_VERIFY_FLAGS);
+
 /**
  * A helper which calculates heights of inputs of a given transaction.
  *

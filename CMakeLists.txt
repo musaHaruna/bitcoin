@@ -234,9 +234,9 @@ target_link_libraries(core_interface INTERFACE
 )
 endif()
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Generic")
-include(AddBoostIfNeeded)
-add_boost_if_needed()
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Generic" AND (BUILD_DAEMON OR BUILD_GUI OR BUILD_TESTS OR BUILD_KERNEL_TEST OR BUILD_BENCH OR BUILD_FUZZ_BINARY OR ENABLE_WALLET OR ENABLE_IPC))
+  include(AddBoostIfNeeded)
+  add_boost_if_needed()
 endif()
 
 if(ENABLE_WALLET)

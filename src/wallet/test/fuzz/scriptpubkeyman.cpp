@@ -12,6 +12,7 @@
 #include <script/interpreter.h>
 #include <script/script.h>
 #include <script/signingprovider.h>
+#include <script/solver.h>
 #include <sync.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>

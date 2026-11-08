@@ -8,6 +8,7 @@
 #include <interfaces/chain.h>
 #include <node/blockstorage.h>
 #include <node/context.h>
+#include <script/solver.h>
 #include <test/util/common.h>
 #include <test/util/logging.h>
 #include <test/util/setup_common.h>

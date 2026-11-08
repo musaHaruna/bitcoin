@@ -25,6 +25,7 @@
 #include <node/types.h>
 #include <policy/feerate.h>
 #include <policy/policy.h>
+#include <policy/settings.h>
 #include <rpc/server.h>
 #include <script/descriptor.h>
 #include <script/solver.h>

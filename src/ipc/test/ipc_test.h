@@ -5,6 +5,7 @@
 #ifndef BITCOIN_IPC_TEST_IPC_TEST_H
 #define BITCOIN_IPC_TEST_IPC_TEST_H
 
+#include <consensus/validation.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <univalue.h>
