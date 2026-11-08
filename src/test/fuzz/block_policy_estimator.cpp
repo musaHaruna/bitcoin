@@ -78,7 +78,7 @@ FUZZ_TARGET(block_policy_estimator, .init = initialize_block_policy_estimator)
                 std::vector<RemovedMempoolTransactionInfo> txs;
                 txs.reserve(mempool_entries.size());
                 for (const CTxMemPoolEntry& mempool_entry : mempool_entries) {
-                    txs.emplace_back(mempool_entry);
+                    txs.emplace_back(mempool_entry.GetInfo());
                 }
                 advance_height();
                 block_policy_estimator.processBlock(txs, current_height);

@@ -55,7 +55,7 @@ void AddRemovedBlock(MemPoolFeeRateEstimator& fee_est,
         block->vtx.emplace_back(tx);
         block_txs_weight -= tx_weight;
         if (removed_txs_weight - tx_weight >= 0) {
-            removed_txs.emplace_back(entry.FromTx(tx));
+            removed_txs.emplace_back(entry.FromTx(tx).GetInfo());
             removed_txs_weight -= tx_weight;
         }
     }

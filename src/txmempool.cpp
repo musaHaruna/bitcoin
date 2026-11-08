@@ -413,7 +413,7 @@ std::vector<RemovedMempoolTransactionInfo> CTxMemPool::removeForBlock(const std:
         for (const auto& tx : vtx) {
             txiter it = mapTx.find(tx->GetHash());
             if (it != mapTx.end()) {
-                txs_removed_for_block.emplace_back(*it);
+                txs_removed_for_block.emplace_back(it->GetInfo());
                 removeUnchecked(it, MemPoolRemovalReason::BLOCK);
             }
             removeConflicts(*tx);

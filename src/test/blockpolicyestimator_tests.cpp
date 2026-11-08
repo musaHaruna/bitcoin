@@ -79,7 +79,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
             // 1/10 blocks add lowest fee transactions
             while (mempool_txs[9 - h].size()) {
                 auto& tx_entry = mempool_txs[9 - h].back();
-                block_txs.emplace_back(tx_entry);
+                block_txs.emplace_back(tx_entry.GetInfo());
                 mempool_txs[9 - h].pop_back();
             }
         }
@@ -165,7 +165,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
     for (int j = 0; j < 10; j++) {
         while (mempool_txs[j].size()) {
             auto& tx_entry = mempool_txs[j].back();
-            block_txs.emplace_back(tx_entry);
+            block_txs.emplace_back(tx_entry.GetInfo());
             mempool_txs[j].pop_back();
         }
     }
@@ -198,7 +198,7 @@ BOOST_AUTO_TEST_CASE(BlockPolicyEstimates)
                                                                                   /*has_no_mempool_parents=*/true)};
 
                 feeEst.processTransaction(tx_info);
-                block_txs.emplace_back(tx_entry);
+                block_txs.emplace_back(tx_entry.GetInfo());
             }
         }
 
