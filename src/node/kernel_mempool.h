@@ -16,16 +16,17 @@ class KernelMempool final : public kernel::Mempool
 
 public:
     explicit KernelMempool(CTxMemPool& pool) : m_mempool{pool} {}
-    void RemoveRecursiveForReorg(const CTransaction& tx) override EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
+    RecursiveMutex& GetMutex() const override LOCK_RETURNED(m_mempool.cs) { return m_mempool.cs; }
+    void RemoveRecursiveForReorg(const CTransaction& tx) override EXCLUSIVE_LOCKS_REQUIRED(cs_main, GetMutex());
     std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& txs) override
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, GetMutex());
     size_t DynamicMemoryUsage() const override;
     void AddTransactionsUpdated(unsigned int n) override;
     void check(const CCoinsViewCache& coins, int64_t spend_height) const override EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool Empty() const override;
     size_t MaxSizeBytes() const override;
     void UpdateForReorg(Chainstate& chainstate, DisconnectedBlockTransactions& disconnected,
-                       bool add_to_mempool) override EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
+                       bool add_to_mempool) override EXCLUSIVE_LOCKS_REQUIRED(cs_main, GetMutex());
 };
 } // namespace node
 

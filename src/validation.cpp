@@ -1346,7 +1346,7 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
 bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool)
 {
     AssertLockHeld(cs_main);
-    if (m_mempool) AssertLockHeld(m_mempool->cs);
+    if (m_kernel_mempool) AssertLockHeld(m_kernel_mempool->GetMutex());
 
     CBlockIndex *pindexDelete = m_chain.Tip();
     assert(pindexDelete);
@@ -1427,7 +1427,7 @@ bool Chainstate::ConnectTip(
     DisconnectedBlockTransactions& disconnectpool)
 {
     AssertLockHeld(cs_main);
-    if (m_mempool) AssertLockHeld(m_mempool->cs);
+    if (m_kernel_mempool) AssertLockHeld(m_kernel_mempool->GetMutex());
 
     assert(pindexNew->pprev == m_chain.Tip());
     // Read block from disk.
@@ -1609,7 +1609,7 @@ void Chainstate::PruneBlockIndexCandidates() {
 bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex& index_most_work, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, std::vector<ConnectedBlock>& connected_blocks)
 {
     AssertLockHeld(cs_main);
-    if (m_mempool) AssertLockHeld(m_mempool->cs);
+    if (m_kernel_mempool) AssertLockHeld(m_kernel_mempool->GetMutex());
 
     const CBlockIndex* pindexOldTip = m_chain.Tip();
     const CBlockIndex* pindexFork = m_chain.FindFork(index_most_work);

@@ -20,22 +20,44 @@ class CTransaction;
 class DisconnectedBlockTransactions;
 
 namespace kernel {
-/** Internal, synchronous integration with a node's transaction pool.
+/** Internal interface for chainstate to call the node's mempool functions.
+ * Calls finish their mempool work before returning.
  *
- * A null attachment means no mempool. The node owns this interface and its pool
- * and must keep both alive until all chainstates have been destroyed. Only the
- * active chainstate is attached; snapshot transitions transfer that attachment.
+ * The node owns this object and the pool. Keep both alive until all chainstates
+ * are destroyed. A null pointer in Chainstate means no mempool is attached.
+ * Only the active chainstate can have a pool attached. Move that attachment
+ * when snapshot processing changes which chainstate is active.
+ *
+ * Chain activation locks cs_main first, then the mutex returned by GetMutex().
+ * Keep both locked while disconnecting blocks, connecting blocks, and updating
+ * the mempool after a reorg. GetMutex() must return the same mutex object
+ * for the lifetime of this mempool implementation.
+ *
+ * While these locks are held, member functions must not call ActivateBestChain(),
+ * directly or indirectly. They must not wait for queued validation notifications
+ * to finish, since notification handlers may need the same locks.
+ *
+ * Member functions that do not require the caller to hold the pool lock must
+ * handle any synchronization they need, such as locking internally or using
+ * atomic operations.
  */
 class Mempool
 {
 public:
     virtual ~Mempool() = default;
+    /** Return the mutex that protects the pool. */
+    virtual RecursiveMutex& GetMutex() const = 0;
     /** Remove this transaction and its descendants after disconnect-queue eviction. */
     virtual void RemoveRecursiveForReorg(const CTransaction& tx)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
-    /** Return owned metadata for confirmed pool transactions in block order. */
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, GetMutex()) = 0;
+    /**
+     * Remove transactions confirmed by the block and transactions conflicting with it.
+     * Return metadata only for transactions previously in the pool and confirmed by
+     * the block, in their order in txs; conflicting removals are not included.
+     * The returned transaction references and values must remain valid after removal.
+     */
     virtual std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& txs)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, GetMutex()) = 0;
     /** Return current dynamic memory usage; synchronize internally if needed. */
     virtual size_t DynamicMemoryUsage() const = 0;
     /** Advance the update counter; synchronize internally if needed. */
@@ -54,7 +76,7 @@ public:
      */
     virtual void UpdateForReorg(Chainstate& chainstate, DisconnectedBlockTransactions& disconnected,
                                bool add_to_mempool)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, GetMutex()) = 0;
 };
 } // namespace kernel
 
