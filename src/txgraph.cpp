@@ -220,8 +220,8 @@ public:
     /** Improve the linearization of this Cluster. Returns how much work was performed and whether
      *  the Cluster's QualityLevel improved as a result. */
     virtual std::pair<uint64_t, bool> Relinearize(TxGraphImpl& graph, int level, uint64_t max_cost) noexcept = 0;
-    /** For every chunk in the cluster, append its FeeFrac to ret. */
-    virtual void AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept = 0;
+    /** For every chunk in the cluster, append its fee/weight and references in linearization order. */
+    virtual void AppendChunks(const TxGraphImpl& graph, std::vector<TxGraph::Chunk>& ret) const noexcept = 0;
     /** Add a TrimTxData entry (filling m_chunk_feerate, m_index, m_tx_size) for every
      *  transaction in the Cluster to ret. Implicit dependencies between consecutive transactions
      *  in the linearization are added to deps. Return the Cluster's total transaction size. */
@@ -299,7 +299,7 @@ public:
     void Merge(TxGraphImpl& graph, int level, Cluster& cluster) noexcept final;
     void ApplyDependencies(TxGraphImpl& graph, int level, std::span<std::pair<GraphIndex, GraphIndex>> to_apply) noexcept final;
     std::pair<uint64_t, bool> Relinearize(TxGraphImpl& graph, int level, uint64_t max_cost) noexcept final;
-    void AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept final;
+    void AppendChunks(const TxGraphImpl& graph, std::vector<TxGraph::Chunk>& ret) const noexcept final;
     uint64_t AppendTrimData(std::vector<TrimTxData>& ret, std::vector<std::pair<GraphIndex, GraphIndex>>& deps) const noexcept final;
     void GetAncestorRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept final;
     void GetDescendantRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept final;
@@ -356,7 +356,7 @@ public:
     void Merge(TxGraphImpl& graph, int level, Cluster& cluster) noexcept final;
     void ApplyDependencies(TxGraphImpl& graph, int level, std::span<std::pair<GraphIndex, GraphIndex>> to_apply) noexcept final;
     std::pair<uint64_t, bool> Relinearize(TxGraphImpl& graph, int level, uint64_t max_cost) noexcept final;
-    void AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept final;
+    void AppendChunks(const TxGraphImpl& graph, std::vector<TxGraph::Chunk>& ret) const noexcept final;
     uint64_t AppendTrimData(std::vector<TrimTxData>& ret, std::vector<std::pair<GraphIndex, GraphIndex>>& deps) const noexcept final;
     void GetAncestorRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept final;
     void GetDescendantRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept final;
@@ -822,7 +822,7 @@ public:
     bool IsOversized(Level level) noexcept final;
     std::strong_ordering CompareMainOrder(const Ref& a, const Ref& b) noexcept final;
     GraphIndex CountDistinctClusters(std::span<const Ref* const> refs, Level level) noexcept final;
-    std::pair<std::vector<FeeFrac>, std::vector<FeeFrac>> GetMainStagingDiagrams() noexcept final;
+    std::pair<std::vector<TxGraph::Chunk>, std::vector<TxGraph::Chunk>> GetMainStagingDiagrams() noexcept final;
     std::vector<Ref*> Trim() noexcept final;
 
     std::unique_ptr<BlockBuilder> GetBlockBuilder() noexcept final;
@@ -1380,17 +1380,29 @@ void SingletonClusterImpl::Compact() noexcept
     // Nothing to compact; SingletonClusterImpl is constant size.
 }
 
-void GenericClusterImpl::AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept
+void GenericClusterImpl::AppendChunks(const TxGraphImpl& graph, std::vector<TxGraph::Chunk>& ret) const noexcept
 {
-    auto chunk_feerates = ChunkLinearization(m_depgraph, m_linearization);
-    ret.reserve(ret.size() + chunk_feerates.size());
-    ret.insert(ret.end(), chunk_feerates.begin(), chunk_feerates.end());
+    const auto linchunking = ChunkLinearizationInfo(m_depgraph, m_linearization);
+    ret.reserve(ret.size() + linchunking.size());
+    LinearizationIndex pos{0};
+    for (const auto& [chunk, chunk_feerate] : linchunking) {
+        const auto chunk_tx_count = chunk.Count();
+        std::vector<TxGraph::Ref*> refs;
+        refs.reserve(chunk_tx_count);
+        for (unsigned j = 0; j < chunk_tx_count; ++j) {
+            const auto cluster_idx = m_linearization[pos];
+            refs.emplace_back(graph.m_entries[m_mapping[cluster_idx]].m_ref);
+            ++pos;
+        }
+        ret.emplace_back(chunk_feerate, std::move(refs));
+    }
 }
 
-void SingletonClusterImpl::AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept
+void SingletonClusterImpl::AppendChunks(const TxGraphImpl& graph, std::vector<TxGraph::Chunk>& ret) const noexcept
 {
     if (GetTxCount()) {
-        ret.push_back(m_feerate);
+        const auto& entry = graph.m_entries[m_graph_index];
+        ret.emplace_back(m_feerate, std::vector<TxGraph::Ref*>{entry.m_ref});
     }
 }
 
@@ -2806,7 +2818,7 @@ TxGraph::GraphIndex TxGraphImpl::CountDistinctClusters(std::span<const Ref* cons
     return ret;
 }
 
-std::pair<std::vector<FeeFrac>, std::vector<FeeFrac>> TxGraphImpl::GetMainStagingDiagrams() noexcept
+std::pair<std::vector<TxGraph::Chunk>, std::vector<TxGraph::Chunk>> TxGraphImpl::GetMainStagingDiagrams() noexcept
 {
     Assume(m_staging_clusterset.has_value());
     MakeAllAcceptable(0);
@@ -2814,22 +2826,22 @@ std::pair<std::vector<FeeFrac>, std::vector<FeeFrac>> TxGraphImpl::GetMainStagin
     MakeAllAcceptable(1);
     Assume(m_staging_clusterset->m_deps_to_add.empty()); // can only fail if staging is oversized
     // For all Clusters in main which conflict with Clusters in staging (i.e., all that are removed
-    // by, or replaced in, staging), gather their chunk feerates.
+    // by, or replaced in, staging), gather their chunks.
     auto main_clusters = GetConflicts();
-    std::vector<FeeFrac> main_feerates, staging_feerates;
+    std::vector<Chunk> main_chunks, staging_chunks;
     for (Cluster* cluster : main_clusters) {
-        cluster->AppendChunkFeerates(main_feerates);
+        cluster->AppendChunks(*this, main_chunks);
     }
     // Do the same for the Clusters in staging themselves.
     for (int quality = 0; quality < int(QualityLevel::NONE); ++quality) {
         for (const auto& cluster : m_staging_clusterset->m_clusters[quality]) {
-            cluster->AppendChunkFeerates(staging_feerates);
+            cluster->AppendChunks(*this, staging_chunks);
         }
     }
     // Sort both by decreasing feerate to obtain diagrams, and return them.
-    std::ranges::sort(main_feerates, std::greater<ByRatioNegSize<FeeFrac>>{});
-    std::ranges::sort(staging_feerates, std::greater<ByRatioNegSize<FeeFrac>>{});
-    return std::make_pair(std::move(main_feerates), std::move(staging_feerates));
+    std::ranges::sort(main_chunks, std::greater<ByRatioNegSize<FeeFrac>>{}, &Chunk::feerate);
+    std::ranges::sort(staging_chunks, std::greater<ByRatioNegSize<FeeFrac>>{}, &Chunk::feerate);
+    return std::make_pair(std::move(main_chunks), std::move(staging_chunks));
 }
 
 void GenericClusterImpl::SanityCheck(const TxGraphImpl& graph, int level) const
@@ -2903,6 +2915,24 @@ void GenericClusterImpl::SanityCheck(const TxGraphImpl& graph, int level) const
     }
     // Verify that each element of m_depgraph occurred in m_linearization.
     assert(m_done == m_depgraph.Positions());
+
+    // Verify both the contents and boundaries of the chunks returned by AppendChunks.
+    std::vector<TxGraph::Chunk> chunks;
+    AppendChunks(graph, chunks);
+    assert(chunks.size() == linchunking.size());
+    LinearizationIndex pos{0};
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        const auto& expected = linchunking[i];
+        assert(chunks[i].refs.size() == expected.transactions.Count());
+        for (auto* ref : chunks[i].refs) {
+            assert(pos < m_linearization.size());
+            const auto cluster_idx = m_linearization[pos++];
+            assert(expected.transactions[cluster_idx]);
+            assert(ref == graph.m_entries[m_mapping[cluster_idx]].m_ref);
+        }
+        assert(chunks[i].feerate == expected.feerate);
+    }
+    assert(pos == m_linearization.size());
 }
 
 void SingletonClusterImpl::SanityCheck(const TxGraphImpl& graph, int level) const
@@ -2925,6 +2955,14 @@ void SingletonClusterImpl::SanityCheck(const TxGraphImpl& graph, int level) cons
                 assert(chunk_data.m_chunk_count == LinearizationIndex(-1));
             }
         }
+
+        // Verify the singleton chunk's fee/weight and sole reference.
+        std::vector<TxGraph::Chunk> chunks;
+        AppendChunks(graph, chunks);
+        assert(chunks.size() == 1);
+        assert(chunks[0].refs.size() == 1);
+        assert(chunks[0].feerate == m_feerate);
+        assert(chunks[0].refs[0] == entry.m_ref);
     }
 }
 

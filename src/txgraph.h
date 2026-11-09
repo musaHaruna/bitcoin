@@ -66,6 +66,32 @@ public:
         MAIN //!< Always refers to the main graph, whether staging is present or not.
     };
 
+    /** A chunk's aggregate fee and weight, with borrowed member references.
+     *
+     * References are in linearization order. The pointers do not keep Ref objects alive and
+     * are not updated when those objects are moved. Graph changes can make the recorded
+     * membership stale.
+     *
+     * Equality and ordering compare only fee and weight information, ignoring refs.
+     * Ordering is by feerate, with smaller weight ranking higher when feerates are equal.
+     */
+    struct Chunk {
+        FeeFrac feerate;
+        std::vector<Ref*> refs;
+
+        Chunk(const FeeFrac& f, std::vector<Ref*> r) noexcept : feerate{f}, refs{std::move(r)} {}
+
+        friend bool operator==(const Chunk& a, const Chunk& b) noexcept
+        {
+            return a.feerate == b.feerate;
+        }
+
+        friend std::strong_ordering operator<=>(const Chunk& a, const Chunk& b) noexcept
+        {
+            return ByRatioNegSize{a.feerate} <=> ByRatioNegSize{b.feerate};
+        }
+    };
+
     /** Virtual destructor, so inheriting is safe. */
     virtual ~TxGraph() = default;
     /** Initialize arg (which must be an empty Ref) to refer to a new transaction in this graph
@@ -166,11 +192,16 @@ public:
      *  do not exist in the queried graph are ignored. Refs can not be null. The queried graph must
      *  not be oversized. */
     virtual GraphIndex CountDistinctClusters(std::span<const Ref* const>, Level level) noexcept = 0;
-    /** For both main and staging (which must both exist and not be oversized), return the combined
-     *  respective feerate diagrams, including chunks from all clusters, but excluding clusters
-     *  that appear identically in both. Use FeeFrac rather than FeePerWeight so CompareChunks is
-     *  usable without type-conversion. */
-    virtual std::pair<std::vector<FeeFrac>, std::vector<FeeFrac>> GetMainStagingDiagrams() noexcept = 0;
+    /** For both main and staging (which must both exist and not be oversized), return their
+     *  respective feerate diagrams, excluding clusters that appear identically in both.
+     *  The first vector describes main and the second staging. Each is sorted by decreasing
+     *  feerate, with smaller weight first when feerates are equal.
+     *
+     *  An unchanged chunk within an affected cluster may appear in both vectors. The vectors
+     *  are not matched pairs of chunks and may have different lengths. Each chunk's refs are
+     *  borrowed as described in Chunk. Extract the FeeFrac fields to use CompareChunks.
+     *  This query does not commit staging. */
+    virtual std::pair<std::vector<Chunk>, std::vector<Chunk>> GetMainStagingDiagrams() noexcept = 0;
     /** Remove transactions (including their own descendants) according to a fast but best-effort
      *  strategy such that the TxGraph's cluster and size limits are respected. Applies to staging
      *  if it exists, and to main otherwise. Returns the list of all removed transactions in

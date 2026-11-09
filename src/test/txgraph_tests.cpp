@@ -432,4 +432,70 @@ BOOST_AUTO_TEST_CASE(txgraph_staging)
     graph->SanityCheck();
 }
 
+BOOST_AUTO_TEST_CASE(txgraph_main_staging_chunk_refs)
+{
+    auto graph = MakeTxGraph(10, 10'000, HIGH_ACCEPTABLE_COST, PointerComparator);
+    TxGraph::Ref parent, child, descendant, unrelated;
+
+    // Insert out of dependency order, with an unrelated graph entry interleaved.
+    graph->AddTransaction(descendant, FeePerWeight{200, 400});
+    graph->AddTransaction(unrelated, FeePerWeight{5000, 400});
+    graph->AddTransaction(child, FeePerWeight{1900, 400});
+    graph->AddTransaction(parent, FeePerWeight{100, 400});
+    graph->AddDependency(parent, child);
+    graph->AddDependency(child, descendant);
+
+    // The chain has two chunks: [parent, child] and [descendant]. Removing the
+    // descendant changes the cluster while leaving its first chunk unchanged.
+    graph->StartStaging();
+    graph->RemoveTransaction(descendant);
+    const auto [main_chunks, staged_chunks] = graph->GetMainStagingDiagrams();
+
+    // The unrelated cluster is omitted from both diagrams.
+    BOOST_REQUIRE_EQUAL(main_chunks.size(), 2U);
+    BOOST_REQUIRE_EQUAL(staged_chunks.size(), 1U);
+    BOOST_CHECK((main_chunks[0].feerate == FeeFrac{2000, 800}));
+    BOOST_CHECK((main_chunks[0].refs == std::vector<TxGraph::Ref*>{&parent, &child}));
+    BOOST_CHECK((main_chunks[1].feerate == FeeFrac{200, 400}));
+    BOOST_CHECK((main_chunks[1].refs == std::vector<TxGraph::Ref*>{&descendant}));
+    BOOST_CHECK((staged_chunks[0].feerate == FeeFrac{2000, 800}));
+    BOOST_CHECK((staged_chunks[0].refs == std::vector<TxGraph::Ref*>{&parent, &child}));
+
+    graph->SanityCheck();
+    graph->AbortStaging();
+    graph->SanityCheck();
+}
+
+BOOST_AUTO_TEST_CASE(txgraph_main_staging_singleton_refs)
+{
+    auto graph = MakeTxGraph(10, 10'000, HIGH_ACCEPTABLE_COST, PointerComparator);
+    TxGraph::Ref tx;
+
+    graph->StartStaging();
+    graph->AddTransaction(tx, FeePerWeight{100, 400});
+    {
+        const auto [main_chunks, staged_chunks] = graph->GetMainStagingDiagrams();
+        BOOST_CHECK(main_chunks.empty());
+        BOOST_REQUIRE_EQUAL(staged_chunks.size(), 1U);
+        BOOST_CHECK((staged_chunks[0].feerate == FeeFrac{100, 400}));
+        BOOST_CHECK((staged_chunks[0].refs == std::vector<TxGraph::Ref*>{&tx}));
+    }
+    graph->SanityCheck();
+    graph->CommitStaging();
+
+    // Removing the singleton leaves a main-only chunk and an empty staging graph.
+    graph->StartStaging();
+    graph->RemoveTransaction(tx);
+    {
+        const auto [main_chunks, staged_chunks] = graph->GetMainStagingDiagrams();
+        BOOST_REQUIRE_EQUAL(main_chunks.size(), 1U);
+        BOOST_CHECK(staged_chunks.empty());
+        BOOST_CHECK((main_chunks[0].feerate == FeeFrac{100, 400}));
+        BOOST_CHECK((main_chunks[0].refs == std::vector<TxGraph::Ref*>{&tx}));
+    }
+    graph->SanityCheck();
+    graph->CommitStaging();
+    graph->SanityCheck();
+}
+
 BOOST_AUTO_TEST_SUITE_END()
