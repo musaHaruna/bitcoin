@@ -498,4 +498,187 @@ BOOST_AUTO_TEST_CASE(txgraph_main_staging_singleton_refs)
     graph->SanityCheck();
 }
 
+BOOST_AUTO_TEST_CASE(txgraph_main_chunk_tracking_memory)
+{
+    auto graph = MakeTxGraph(10, 10'000, HIGH_ACCEPTABLE_COST, PointerComparator);
+    BOOST_CHECK_EQUAL(graph->GetMainMemoryUsage(), 0U);
+    {
+        TxGraph::Ref tx;
+        graph->AddTransaction(tx, FeePerWeight{100, 400});
+        BOOST_CHECK_GT(graph->GetMainMemoryUsage(), 0U);
+        graph->StartStaging();
+        graph->RemoveTransaction(tx);
+        graph->CommitStaging();
+        BOOST_CHECK_EQUAL(graph->GetMainMemoryUsage(), 0U);
+    }
+    BOOST_CHECK_EQUAL(graph->GetMainMemoryUsage(), 0U);
+    {
+        TxGraph::Ref parent, child;
+        graph->AddTransaction(parent, FeePerWeight{100, 400});
+        graph->AddTransaction(child, FeePerWeight{1900, 400});
+        graph->AddDependency(parent, child);
+        BOOST_REQUIRE(graph->DoWork(HIGH_ACCEPTABLE_COST));
+        const auto untracked = graph->GetMainMemoryUsage();
+        graph->EnableMainChunkTracking();
+        const auto queued = graph->GetMainMemoryUsage();
+        BOOST_CHECK_GT(queued, untracked);
+        BOOST_REQUIRE_EQUAL(graph->TakeChangedMainChunks().size(), 1U);
+        const auto consumed = graph->GetMainMemoryUsage();
+        // Consuming changes frees the queued references, while the tracking
+        // container retains storage for subsequent changes.
+        BOOST_CHECK_LT(consumed, queued);
+        BOOST_CHECK_GT(consumed, untracked);
+    }
+    BOOST_CHECK_EQUAL(graph->GetTransactionCount(TxGraph::Level::MAIN), 0U);
+    BOOST_CHECK(graph->TakeChangedMainChunks().empty());
+    BOOST_CHECK_GT(graph->GetMainMemoryUsage(), 0U);
+    graph->SanityCheck();
+}
+
+BOOST_AUTO_TEST_CASE(txgraph_main_chunk_changes)
+{
+    auto graph = MakeTxGraph(10, 10'000, HIGH_ACCEPTABLE_COST, PointerComparator);
+    TxGraph::Ref parent, child, descendant, unrelated;
+    graph->AddTransaction(parent, FeePerWeight{100, 400});
+    graph->AddTransaction(child, FeePerWeight{1900, 400});
+    graph->AddDependency(parent, child);
+    graph->AddTransaction(unrelated, FeePerWeight{5000, 400});
+
+    // Enabling on an existing graph gives a complete initial snapshot.
+    graph->EnableMainChunkTracking();
+    const auto initial = graph->TakeChangedMainChunks();
+    BOOST_REQUIRE_EQUAL(initial.size(), 2U);
+    BOOST_CHECK((initial[0].refs == std::vector<TxGraph::Ref*>{&unrelated}));
+    BOOST_CHECK((initial[1].refs == std::vector<TxGraph::Ref*>{&parent, &child}));
+    BOOST_CHECK(graph->TakeChangedMainChunks().empty());
+    graph->EnableMainChunkTracking();
+    BOOST_CHECK(graph->TakeChangedMainChunks().empty());
+
+    // A hypothetical change, including its diagram query, is not a main change.
+    graph->StartStaging();
+    graph->RemoveTransaction(child);
+    (void)graph->GetMainStagingDiagrams();
+    BOOST_CHECK(graph->TakeChangedMainChunks().empty());
+    graph->AbortStaging();
+    BOOST_CHECK(graph->TakeChangedMainChunks().empty());
+
+    // Committing a new descendant reports the entire affected cluster, including
+    // its unchanged first chunk, and omits the unrelated cluster.
+    graph->StartStaging();
+    graph->AddTransaction(descendant, FeePerWeight{200, 400});
+    graph->AddDependency(child, descendant);
+    graph->CommitStaging();
+    const auto added = graph->TakeChangedMainChunks();
+    BOOST_REQUIRE_EQUAL(added.size(), 2U);
+    BOOST_CHECK((added[0].refs == std::vector<TxGraph::Ref*>{&parent, &child}));
+    BOOST_CHECK((added[1].refs == std::vector<TxGraph::Ref*>{&descendant}));
+    BOOST_CHECK(graph->TakeChangedMainChunks().empty());
+
+    // A fee-only change keeps its membership but must still be reported.
+    graph->SetTransactionFee(unrelated, 6000);
+    const auto reprioritised = graph->TakeChangedMainChunks();
+    BOOST_REQUIRE_EQUAL(reprioritised.size(), 1U);
+    BOOST_CHECK((reprioritised[0].refs == std::vector<TxGraph::Ref*>{&unrelated}));
+    BOOST_CHECK((reprioritised[0].feerate == FeeFrac{6000, 400}));
+
+    // Removed members are omitted; their surviving cluster is reported.
+    graph->StartStaging();
+    graph->RemoveTransaction(descendant);
+    graph->CommitStaging();
+    const auto removed = graph->TakeChangedMainChunks();
+    BOOST_REQUIRE_EQUAL(removed.size(), 1U);
+    BOOST_CHECK((removed[0].refs == std::vector<TxGraph::Ref*>{&parent, &child}));
+    BOOST_CHECK(graph->TakeChangedMainChunks().empty());
+    graph->SanityCheck();
+}
+
+BOOST_AUTO_TEST_CASE(txgraph_main_chunk_changes_ref_lifetime)
+{
+    auto graph = MakeTxGraph(10, 10'000, HIGH_ACCEPTABLE_COST, PointerComparator);
+    graph->EnableMainChunkTracking();
+
+    auto original = std::make_unique<TxGraph::Ref>();
+    graph->AddTransaction(*original, FeePerWeight{100, 400});
+    TxGraph::Ref moved{std::move(*original)};
+    original.reset();
+    graph->SanityCheck();
+    const auto relocated = graph->TakeChangedMainChunks();
+    BOOST_REQUIRE_EQUAL(relocated.size(), 1U);
+    BOOST_CHECK((relocated[0].refs == std::vector<TxGraph::Ref*>{&moved}));
+
+    // Destroying a queued reference must not leave a dangling pointer to inspect.
+    auto discarded = std::make_unique<TxGraph::Ref>();
+    graph->AddTransaction(*discarded, FeePerWeight{200, 400});
+    discarded.reset();
+    graph->SanityCheck();
+    BOOST_CHECK(graph->TakeChangedMainChunks().empty());
+
+    // Compaction can renumber graph entries without moving their external Refs.
+    auto earlier = std::make_unique<TxGraph::Ref>();
+    TxGraph::Ref later;
+    graph->AddTransaction(*earlier, FeePerWeight{300, 400});
+    graph->AddTransaction(later, FeePerWeight{400, 400});
+    (void)graph->TakeChangedMainChunks();
+    graph->SetTransactionFee(later, 500);
+    earlier.reset();
+    const auto compacted = graph->TakeChangedMainChunks();
+    BOOST_REQUIRE_EQUAL(compacted.size(), 1U);
+    BOOST_CHECK((compacted[0].refs == std::vector<TxGraph::Ref*>{&later}));
+    BOOST_CHECK((compacted[0].feerate == FeeFrac{500, 400}));
+    graph->SanityCheck();
+}
+
+BOOST_AUTO_TEST_CASE(txgraph_main_chunk_changes_after_trim)
+{
+    auto graph = MakeTxGraph(2, 10'000, HIGH_ACCEPTABLE_COST, PointerComparator);
+    TxGraph::Ref parent, child, descendant;
+    graph->AddTransaction(parent, FeePerWeight{100, 400});
+    graph->AddTransaction(child, FeePerWeight{1000, 400});
+    graph->AddTransaction(descendant, FeePerWeight{500, 400});
+    graph->EnableMainChunkTracking();
+    (void)graph->TakeChangedMainChunks();
+
+    graph->StartStaging();
+    graph->AddDependency(parent, child);
+    graph->AddDependency(child, descendant);
+    BOOST_REQUIRE(graph->IsOversized(TxGraph::Level::TOP));
+    const auto removed = graph->Trim();
+    BOOST_REQUIRE_EQUAL(removed.size(), 1U);
+    BOOST_CHECK(removed[0] == &descendant);
+    BOOST_CHECK(!graph->IsOversized(TxGraph::Level::TOP));
+    // Trimming has already repaired staging; no abort/replay is necessary.
+    (void)graph->GetMainStagingDiagrams();
+    graph->CommitStaging();
+
+    const auto changes = graph->TakeChangedMainChunks();
+    BOOST_REQUIRE_EQUAL(changes.size(), 1U);
+    BOOST_CHECK((changes[0].refs == std::vector<TxGraph::Ref*>{&parent, &child}));
+    BOOST_CHECK((changes[0].feerate == FeeFrac{1100, 800}));
+    graph->SanityCheck();
+}
+
+BOOST_AUTO_TEST_CASE(txgraph_main_chunk_changes_after_additional_work)
+{
+    // A zero initial work budget leaves the cluster acceptable without proving
+    // optimality. Later DoWork() can revisit it independently of new mutations.
+    auto graph = MakeTxGraph(10, 10'000, /*acceptable_cost=*/0, PointerComparator);
+    TxGraph::Ref parent, child;
+    graph->AddTransaction(parent, FeePerWeight{100, 400});
+    graph->AddTransaction(child, FeePerWeight{1900, 400});
+    graph->AddDependency(parent, child);
+    graph->EnableMainChunkTracking();
+    BOOST_REQUIRE_EQUAL(graph->TakeChangedMainChunks().size(), 1U);
+    BOOST_CHECK(graph->TakeChangedMainChunks().empty());
+
+    BOOST_CHECK(graph->DoWork(HIGH_ACCEPTABLE_COST));
+    const auto revisited = graph->TakeChangedMainChunks();
+    BOOST_REQUIRE_EQUAL(revisited.size(), 1U);
+    BOOST_CHECK((revisited[0].refs == std::vector<TxGraph::Ref*>{&parent, &child}));
+    BOOST_CHECK((revisited[0].feerate == FeeFrac{2000, 800}));
+    // A consumer compares observations to discard this unchanged result; the
+    // graph cannot silently omit clusters merely because DoWork triggered them.
+    BOOST_CHECK(graph->TakeChangedMainChunks().empty());
+    graph->SanityCheck();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -202,6 +202,22 @@ public:
      *  borrowed as described in Chunk. Extract the FeeFrac fields to use CompareChunks.
      *  This query does not commit staging. */
     virtual std::pair<std::vector<Chunk>, std::vector<Chunk>> GetMainStagingDiagrams() noexcept = 0;
+
+    /** Enable tracking of changes to main's chunks. Tracking is disabled by default. The first
+     *  call queues all existing main transactions, so the first TakeChangedMainChunks() provides
+     *  an initial snapshot. Further calls have no effect. */
+    virtual void EnableMainChunkTracking() noexcept = 0;
+    /** Return every current chunk in main clusters changed since tracking was enabled or this
+     *  function was last called, and consume those changes. Includes changes caused by lazy
+     *  maintenance, fee updates, and DoWork(), including changes to otherwise untouched clusters.
+     *  Unchanged chunks within a changed cluster can be returned too. Staging-only changes are
+     *  not reported until committed. The main graph must not be oversized.
+     *
+     *  Tracking must be enabled first. The returned references are borrowed, in linearization
+     *  order, and must be consumed before their objects are moved or destroyed. Removed
+     *  transactions are not returned; the caller must retain its previous observation and track
+     *  removals separately. There is one consumable change stream, not one per caller. */
+    virtual std::vector<Chunk> TakeChangedMainChunks() noexcept = 0;
     /** Remove transactions (including their own descendants) according to a fast but best-effort
      *  strategy such that the TxGraph's cluster and size limits are respected. Applies to staging
      *  if it exists, and to main otherwise. Returns the list of all removed transactions in
