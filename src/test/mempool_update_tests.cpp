@@ -867,6 +867,51 @@ BOOST_AUTO_TEST_CASE(MempoolUpdated_EmptyBlock)
     BOOST_CHECK_GT(update.sequence, 0U);
 }
 
+BOOST_AUTO_TEST_CASE(MempoolUpdated_Prioritisation)
+{
+    TestMemPoolEntryHelper entry;
+    auto tx = ConstructTx();
+    const CAmount fee{1000};
+    const CAmount delta{2000};
+    const auto tx_entry = entry.Fee(fee).FromTx(tx);
+    const FeeFrac original_rate{fee, tx_entry.GetAdjustedWeight()};
+    const FeeFrac prioritised_rate{fee + delta, tx_entry.GetAdjustedWeight()};
+    const auto expected_hash = ExpectedChunkHash({tx});
+
+    AddWithContext(tx_entry, MemPoolObservationContext{100, true, false});
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE_EQUAL(listener.updates.size(), 1U);
+    BOOST_REQUIRE_EQUAL(listener.updates[0].new_chunks.size(), 1U);
+    BOOST_CHECK(listener.updates[0].new_chunks[0].m_fee_estimation_eligible);
+    const auto initial_sequence = listener.updates[0].sequence;
+    listener.Clear();
+    {
+        LOCK2(cs_main, mpool.cs);
+        mpool.PrioritiseTransaction(tx.GetHash(), delta);
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE_EQUAL(listener.updates.size(), 1U);
+    const auto& update = listener.updates[0];
+    BOOST_CHECK(update.cause == MemPoolUpdateCause::PRIORITISATION);
+    BOOST_CHECK(!update.block_height.has_value());
+    BOOST_REQUIRE(update.observation_height.has_value());
+    BOOST_CHECK_EQUAL(update.observation_height.value(), 100U);
+    // Prioritisation retains the known height but supplies no fresh validation context.
+    BOOST_CHECK(!update.chainstate_is_current);
+    BOOST_CHECK(update.fully_confirmed_chunks.empty());
+    BOOST_REQUIRE_EQUAL(update.old_chunks.size(), 1U);
+    BOOST_REQUIRE_EQUAL(update.new_chunks.size(), 1U);
+    // Membership stays the same; its fee/weight and eligibility change.
+    BOOST_CHECK_EQUAL(update.old_chunks[0].m_chunk_hash, expected_hash);
+    BOOST_CHECK_EQUAL(update.new_chunks[0].m_chunk_hash, expected_hash);
+    BOOST_CHECK(update.old_chunks[0].m_fee_rate == original_rate);
+    BOOST_CHECK(update.new_chunks[0].m_fee_rate == prioritised_rate);
+    BOOST_CHECK(update.old_chunks[0].m_fee_estimation_eligible);
+    BOOST_CHECK(!update.new_chunks[0].m_fee_estimation_eligible);
+    BOOST_CHECK_GT(update.sequence, initial_sequence);
+    BOOST_CHECK(mpool.exists(tx.GetHash()));
+}
+
 BOOST_AUTO_TEST_CASE(MempoolUpdated_UnseenSponsorPropagatesThroughKnownChild)
 {
     TestMemPoolEntryHelper entry;
@@ -889,6 +934,31 @@ BOOST_AUTO_TEST_CASE(MempoolUpdated_UnseenSponsorPropagatesThroughKnownChild)
         BOOST_REQUIRE(block->ending_reasons.contains(hash));
         BOOST_CHECK(block->ending_reasons.at(hash) == (hash == independent_hash ? MemPoolChunkEndReason::CONFIRMED : MemPoolChunkEndReason::UNSEEN_SPONSOR));
     }
+}
+
+BOOST_AUTO_TEST_CASE(MempoolUpdated_LocalDeltaExcludesSeparateChildChunk)
+{
+    TestMemPoolEntryHelper entry;
+    const auto parent = ConstructTx();
+    const auto child = ConstructTx(90'000, COutPoint{parent.GetHash(), 0});
+    AddWithContext(entry.Fee(100).FromTx(parent), {100, true, false});
+    mpool.PrioritiseTransaction(parent.GetHash(), 100'000);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    listener.Clear();
+    AddWithContext(entry.Fee(9900).FromTx(child), {100, true, false});
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE(!listener.updates.empty());
+    const auto& update = listener.updates.back();
+    BOOST_REQUIRE_EQUAL(update.new_chunks.size(), 2U);
+    for (const auto& chunk : update.new_chunks) BOOST_CHECK(!chunk.m_fee_estimation_eligible);
+    listener.Clear();
+    BlockRemoval({MakeTransactionRef(parent)}, 101);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    bool eligible_child{false};
+    for (const auto& u : listener.updates) for (const auto& chunk : u.new_chunks) {
+        if (chunk.m_chunk_hash == ExpectedChunkHash({child})) eligible_child |= chunk.m_fee_estimation_eligible;
+    }
+    BOOST_CHECK(eligible_child);
 }
 
 BOOST_AUTO_TEST_CASE(MempoolUpdated_PartialAndConflictEvidencePrecedesRemoval)

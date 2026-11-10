@@ -101,12 +101,24 @@ void CTxMemPool::PublishChunkUpdate(MemPoolRemovalReason reason, MemPoolUpdateCa
     for (const auto& [wtxid, removal_reason] : m_removed_chunk_wtxids) remember_old(wtxid);
 
     const auto changed_chunks = m_txgraph->TakeChangedMainChunks();
+    // A fee delta can change boundaries of other chunks in the same cluster.
+    // Inspect each affected cluster once, including prerequisites outside a chunk.
+    std::map<const TxGraph::Ref*, bool> cluster_has_delta;
     std::vector<PublishedChunk> replacements;
     for (const auto& chunk : changed_chunks) {
         Assert(!chunk.refs.empty());
+        const auto* representative = chunk.refs.front();
+        if (!cluster_has_delta.contains(representative)) {
+            const auto cluster = m_txgraph->GetCluster(*representative, TxGraph::Level::MAIN);
+            const bool has_delta = std::ranges::any_of(cluster, [](const TxGraph::Ref* ref) {
+                const auto& entry = static_cast<const CTxMemPoolEntry&>(*ref);
+                return entry.GetModifiedFee() != entry.GetFee();
+            });
+            for (const auto* ref : cluster) cluster_has_delta.emplace(ref, has_delta);
+        }
         std::vector<Wtxid> members;
         members.reserve(chunk.refs.size());
-        bool eligible{true};
+        bool eligible{!cluster_has_delta.at(representative)};
         for (const auto* ref : chunk.refs) {
             const auto& entry = static_cast<const CTxMemPoolEntry&>(*ref);
             const auto& wtxid = entry.GetTx().GetWitnessHash();
@@ -139,6 +151,7 @@ void CTxMemPool::PublishChunkUpdate(MemPoolRemovalReason reason, MemPoolUpdateCa
         const auto& old = it->second;
         if (!reset) update.old_chunks.push_back(old.description);
         auto ending = MemPoolChunkEndReason::PACKAGE_CHANGED;
+        if (cause == MemPoolUpdateCause::PRIORITISATION) ending = MemPoolChunkEndReason::LOCAL_POLICY;
         if (cause == MemPoolUpdateCause::REORDERING) ending = MemPoolChunkEndReason::REORDERING;
         if (cause == MemPoolUpdateCause::REORG) ending = MemPoolChunkEndReason::OBSERVATION_LOST;
         for (const auto& member : old.members) {
@@ -900,6 +913,10 @@ void CTxMemPool::PrioritiseTransaction(const Txid& hash, const CAmount& nFeeDelt
 {
     {
         LOCK(cs);
+        // This RPC does not capture fresh validation context. Retain the known
+        // height, but do not let an old freshness result authorize new samples.
+        if (m_chunk_context) m_chunk_context->chainstate_is_current = false;
+        PrepareChunkUpdate();
         CAmount &delta = mapDeltas[hash];
         delta = SaturatingAdd(delta, nFeeDelta);
         txiter it = mapTx.find(hash);
@@ -910,6 +927,7 @@ void CTxMemPool::PrioritiseTransaction(const Txid& hash, const CAmount& nFeeDelt
             m_txgraph->SetTransactionFee(*it, it->GetModifiedFee());
             ++nTransactionsUpdated;
         }
+        PublishChunkUpdate(MemPoolRemovalReason::REPLACED, MemPoolUpdateCause::PRIORITISATION);
         if (delta == 0) {
             mapDeltas.erase(hash);
             LogInfo("PrioritiseTransaction: %s (%sin mempool) delta cleared\n", hash.ToString(), it == mapTx.end() ? "not " : "");
