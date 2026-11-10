@@ -17,6 +17,7 @@
 #include <tinyformat.h>
 #include <util/check.h>
 #include <util/feefrac.h>
+#include <util/hasher.h>
 #include <util/log.h>
 #include <util/moneystr.h>
 #include <util/overflow.h>
@@ -52,6 +53,130 @@ bool TestLockPointValidity(CChain& active_chain, const LockPoints& lp)
 
     // LockPoints still valid
     return true;
+}
+
+void CTxMemPool::PrepareChunkUpdate(std::optional<MemPoolObservationContext> context)
+{
+    AssertLockHeld(cs);
+    if (!m_opts.signals) return;
+    // Inspectors can perform lazy graph maintenance between mutations. Publish
+    // those changes at the preceding height before changing the observation clock.
+    PublishChunkUpdate(MemPoolRemovalReason::REPLACED, MemPoolUpdateCause::REORDERING);
+    if (context) m_chunk_context = context;
+}
+
+void CTxMemPool::PublishChunkUpdate(MemPoolRemovalReason reason, MemPoolUpdateCause cause,
+                                  const std::vector<CTransactionRef>* block_txs,
+                                  bool force)
+{
+    AssertLockHeld(cs);
+    if (!m_opts.signals) return;
+
+    MemPoolChunksUpdate update{
+        .old_chunks = {},
+        .new_chunks = {},
+        .reason = reason,
+        .block_height = cause == MemPoolUpdateCause::BLOCK && m_chunk_context
+            ? std::optional<unsigned int>{m_chunk_context->height} : std::nullopt,
+        .fully_confirmed_chunks = {},
+        .observation_height = m_chunk_context
+            ? std::optional<unsigned int>{m_chunk_context->height} : std::nullopt,
+        .chainstate_is_current = m_chunk_context && m_chunk_context->chainstate_is_current,
+        .cause = cause,
+    };
+
+    std::set<uint256> old_hashes;
+    const auto remember_old = [&](const Wtxid& wtxid) EXCLUSIVE_LOCKS_REQUIRED(cs) {
+        const auto it = m_published_chunk_by_wtxid.find(wtxid);
+        if (it != m_published_chunk_by_wtxid.end()) old_hashes.insert(it->second);
+    };
+    for (const auto& [wtxid, removal_reason] : m_removed_chunk_wtxids) remember_old(wtxid);
+
+    const auto changed_chunks = m_txgraph->TakeChangedMainChunks();
+    std::vector<PublishedChunk> replacements;
+    for (const auto& chunk : changed_chunks) {
+        Assert(!chunk.refs.empty());
+        std::vector<Wtxid> members;
+        members.reserve(chunk.refs.size());
+        bool eligible{true};
+        for (const auto* ref : chunk.refs) {
+            const auto& entry = static_cast<const CTxMemPoolEntry&>(*ref);
+            const auto& wtxid = entry.GetTx().GetWitnessHash();
+            members.push_back(wtxid);
+            remember_old(wtxid);
+            eligible &= m_fee_estimation_eligible.contains(wtxid) && entry.GetModifiedFee() == entry.GetFee();
+        }
+        Assert(!members.empty());
+        const auto hash = GetHashFromWitnesses(members);
+        replacements.push_back({MemPoolChunk{chunk.feerate, hash, eligible, uint32_t(members.size())}, std::move(members)});
+    }
+
+    bool changed = old_hashes.size() != replacements.size();
+    for (const auto& chunk : replacements) {
+        const auto it = m_published_chunks.find(chunk.description.m_chunk_hash);
+        changed |= it == m_published_chunks.end() ||
+            it->second.description.m_fee_rate != chunk.description.m_fee_rate ||
+            it->second.description.m_fee_estimation_eligible != chunk.description.m_fee_estimation_eligible;
+    }
+
+    std::set<Wtxid> block_members;
+    if (block_txs) {
+        for (const auto& tx : *block_txs) block_members.insert(tx->GetWitnessHash());
+    }
+    for (const auto& hash : old_hashes) {
+        const auto it = m_published_chunks.find(hash);
+        Assert(it != m_published_chunks.end());
+        const auto& old = it->second;
+        update.old_chunks.push_back(old.description);
+        auto ending = MemPoolChunkEndReason::PACKAGE_CHANGED;
+        if (cause == MemPoolUpdateCause::REORDERING) ending = MemPoolChunkEndReason::REORDERING;
+        for (const auto& member : old.members) {
+            if (const auto removed = m_removed_chunk_wtxids.find(member); removed != m_removed_chunk_wtxids.end()) {
+                switch (removed->second) {
+                case MemPoolRemovalReason::REPLACED: ending = MemPoolChunkEndReason::REPLACED; break;
+                case MemPoolRemovalReason::EXPIRY: ending = MemPoolChunkEndReason::EXPIRY; break;
+                case MemPoolRemovalReason::SIZELIMIT: ending = MemPoolChunkEndReason::EVICTION; break;
+                case MemPoolRemovalReason::CONFLICT: ending = MemPoolChunkEndReason::BLOCK_CONFLICT; break;
+                case MemPoolRemovalReason::REORG: ending = MemPoolChunkEndReason::OBSERVATION_LOST; break;
+                case MemPoolRemovalReason::BLOCK: break;
+                }
+            }
+        }
+        if (block_txs) {
+            const auto included = std::ranges::count_if(old.members, [&](const Wtxid& wtxid) { return block_members.contains(wtxid); });
+            if (static_cast<size_t>(included) == old.members.size()) {
+                update.fully_confirmed_chunks.push_back(hash);
+                ending = MemPoolChunkEndReason::CONFIRMED;
+            } else if (included) {
+                ending = MemPoolChunkEndReason::PARTIAL_CONFIRMATION;
+            }
+        }
+        update.ending_reasons.try_emplace(hash, ending);
+        for (const auto& member : old.members) m_published_chunk_by_wtxid.erase(member);
+        m_published_members_usage -= memusage::DynamicUsage(old.members);
+        m_published_chunks.erase(it);
+    }
+    for (auto& chunk : replacements) {
+        const auto hash = chunk.description.m_chunk_hash;
+        update.new_chunks.push_back(chunk.description);
+        for (const auto& member : chunk.members) {
+            const auto [it, inserted] = m_published_chunk_by_wtxid.emplace(member, hash);
+            Assert(inserted);
+        }
+        m_published_members_usage += memusage::DynamicUsage(chunk.members);
+        const auto [it, inserted] = m_published_chunks.emplace(hash, std::move(chunk));
+        Assert(inserted);
+    }
+    m_removed_chunk_wtxids.clear();
+    if (!changed && !force) return;
+    const auto order = [](const MemPoolChunk& a, const MemPoolChunk& b) {
+        if (a.m_fee_rate != b.m_fee_rate) return ByRatioNegSize{a.m_fee_rate} > ByRatioNegSize{b.m_fee_rate};
+        return a.m_chunk_hash < b.m_chunk_hash;
+    };
+    std::ranges::sort(update.old_chunks, order);
+    std::ranges::sort(update.new_chunks, order);
+    update.sequence = ++m_chunk_update_sequence;
+    m_opts.signals->MempoolUpdated(update);
 }
 
 std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> CTxMemPool::GetChildren(const CTxMemPoolEntry& entry) const
@@ -185,6 +310,7 @@ CTxMemPool::CTxMemPool(Options opts, bilingual_str& error)
             const Txid& txid_b = static_cast<const CTxMemPoolEntry&>(b).GetTx().GetHash();
             return txid_a <=> txid_b;
         });
+    if (m_opts.signals) m_txgraph->EnableMainChunkTracking();
 }
 
 bool CTxMemPool::isSpent(const COutPoint& outpoint) const
@@ -224,6 +350,7 @@ void CTxMemPool::Apply(ChangeSet* changeset)
     if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
         LogDebug(BCLog::MEMPOOL, "Mempool in non-optimal ordering after addition(s).");
     }
+    PublishChunkUpdate(MemPoolRemovalReason::REPLACED, MemPoolUpdateCause::TRANSACTIONS);
 }
 
 void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit)
@@ -262,6 +389,11 @@ void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit)
 
 void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
 {
+    if (m_opts.signals) {
+        const auto& wtxid = it->GetTx().GetWitnessHash();
+        m_removed_chunk_wtxids.emplace(wtxid, reason);
+        m_fee_estimation_eligible.erase(wtxid);
+    }
     // We increment mempool sequence value no matter removal reason
     // even if not directly reported below.
     uint64_t mempool_sequence = GetAndIncrementSequence();
@@ -324,10 +456,12 @@ void CTxMemPool::removeRecursive(CTxMemPool::txiter to_remove, MemPoolRemovalRea
 {
     AssertLockHeld(cs);
     Assume(!m_have_changeset);
+    PrepareChunkUpdate();
     auto descendants = m_txgraph->GetDescendants(*to_remove, TxGraph::Level::MAIN);
     for (auto tx: descendants) {
         removeUnchecked(mapTx.iterator_to(static_cast<const CTxMemPoolEntry&>(*tx)), reason);
     }
+    PublishChunkUpdate(reason, MemPoolUpdateCause::REMOVAL);
 }
 
 void CTxMemPool::removeRecursive(const CTransaction &origTx, MemPoolRemovalReason reason)
@@ -339,6 +473,7 @@ void CTxMemPool::removeRecursive(const CTransaction &origTx, MemPoolRemovalReaso
     if (origit != mapTx.end()) {
         removeRecursive(origit, reason);
     } else {
+        PrepareChunkUpdate();
         // When recursively removing but origTx isn't in the mempool
         // be sure to remove any descendants that are in the pool. This can
         // happen during chain re-orgs if origTx isn't re-accepted into
@@ -354,6 +489,7 @@ void CTxMemPool::removeRecursive(const CTransaction &origTx, MemPoolRemovalReaso
             auto tx = mapTx.iterator_to(static_cast<const CTxMemPoolEntry&>(*ref));
             removeUnchecked(tx, reason);
         }
+        PublishChunkUpdate(reason, MemPoolUpdateCause::REMOVAL);
     }
 }
 
@@ -402,11 +538,13 @@ void CTxMemPool::removeConflicts(const CTransaction &tx)
     }
 }
 
-std::vector<RemovedMempoolTransactionInfo> CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx)
+std::vector<RemovedMempoolTransactionInfo> CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, std::optional<MemPoolObservationContext> context)
 {
     // Remove confirmed txs and conflicts when a new block is connected, updating the fee logic
     AssertLockHeld(cs);
     Assume(!m_have_changeset);
+    PrepareChunkUpdate(context);
+    if (!context) m_chunk_context.reset();
     std::vector<RemovedMempoolTransactionInfo> txs_removed_for_block;
     if (mapTx.size() || mapNextTx.size() || mapDeltas.size()) {
         txs_removed_for_block.reserve(vtx.size());
@@ -416,6 +554,13 @@ std::vector<RemovedMempoolTransactionInfo> CTxMemPool::removeForBlock(const std:
                 txs_removed_for_block.emplace_back(*it);
                 removeUnchecked(it, MemPoolRemovalReason::BLOCK);
             }
+        }
+    }
+    // Publish the block boundary even when no local transaction was mined.
+    PublishChunkUpdate(MemPoolRemovalReason::BLOCK, MemPoolUpdateCause::BLOCK,
+                       &vtx, /*force=*/true);
+    if (mapTx.size() || mapNextTx.size() || mapDeltas.size()) {
+        for (const auto& tx : vtx) {
             removeConflicts(*tx);
             ClearPrioritisation(tx->GetHash());
         }
@@ -425,6 +570,7 @@ std::vector<RemovedMempoolTransactionInfo> CTxMemPool::removeForBlock(const std:
     if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
         LogDebug(BCLog::MEMPOOL, "Mempool in non-optimal ordering after block.");
     }
+    PublishChunkUpdate(MemPoolRemovalReason::REPLACED, MemPoolUpdateCause::REORDERING);
     return txs_removed_for_block;
 }
 
@@ -826,7 +972,10 @@ void CCoinsViewMemPool::Reset()
 size_t CTxMemPool::DynamicMemoryUsage() const {
     LOCK(cs);
     // Estimate the overhead of mapTx to be 9 pointers (3 pointers per index) + an allocation, as no exact formula for boost::multi_index_contained is implemented.
-    return memusage::MallocUsage(sizeof(CTxMemPoolEntry) + 9 * sizeof(void*)) * mapTx.size() + memusage::DynamicUsage(mapNextTx) + memusage::DynamicUsage(mapDeltas) + memusage::DynamicUsage(txns_randomized) + memusage::DynamicUsage(m_unbroadcast_txids) + m_txgraph->GetMainMemoryUsage() + cachedInnerUsage;
+    return memusage::MallocUsage(sizeof(CTxMemPoolEntry) + 9 * sizeof(void*)) * mapTx.size() + memusage::DynamicUsage(mapNextTx) + memusage::DynamicUsage(mapDeltas) + memusage::DynamicUsage(txns_randomized) + memusage::DynamicUsage(m_unbroadcast_txids) + m_txgraph->GetMainMemoryUsage() + cachedInnerUsage
+        + memusage::DynamicUsage(m_published_chunks) + memusage::DynamicUsage(m_published_chunk_by_wtxid)
+        + memusage::DynamicUsage(m_removed_chunk_wtxids) + memusage::DynamicUsage(m_fee_estimation_eligible)
+        + m_published_members_usage;
 }
 
 void CTxMemPool::RemoveUnbroadcastTx(const Txid& txid, const bool unchecked) {
@@ -838,7 +987,8 @@ void CTxMemPool::RemoveUnbroadcastTx(const Txid& txid, const bool unchecked) {
     }
 }
 
-void CTxMemPool::RemoveStaged(setEntries &stage, MemPoolRemovalReason reason) {
+void CTxMemPool::RemoveStaged(const setEntries& stage, MemPoolRemovalReason reason)
+{
     AssertLockHeld(cs);
     for (txiter it : stage) {
         removeUnchecked(it, reason);
@@ -860,6 +1010,7 @@ int CTxMemPool::Expire(std::chrono::seconds time)
 {
     AssertLockHeld(cs);
     Assume(!m_have_changeset);
+    PrepareChunkUpdate();
     indexed_transaction_set::index<entry_time>::type::iterator it = mapTx.get<entry_time>().begin();
     setEntries toremove;
     while (it != mapTx.get<entry_time>().end() && it->GetTime() < time) {
@@ -871,6 +1022,7 @@ int CTxMemPool::Expire(std::chrono::seconds time)
         CalculateDescendants(removeit, stage);
     }
     RemoveStaged(stage, MemPoolRemovalReason::EXPIRY);
+    PublishChunkUpdate(MemPoolRemovalReason::EXPIRY, MemPoolUpdateCause::REMOVAL);
     return stage.size();
 }
 
@@ -909,6 +1061,7 @@ void CTxMemPool::trackPackageRemoved(const CFeeRate& rate) {
 void CTxMemPool::TrimToSize(size_t sizelimit, std::vector<COutPoint>* pvNoSpendsRemaining) {
     AssertLockHeld(cs);
     Assume(!m_have_changeset);
+    PrepareChunkUpdate();
 
     unsigned nTxnRemoved = 0;
     CFeeRate maxFeeRateRemoved(0);
@@ -943,6 +1096,7 @@ void CTxMemPool::TrimToSize(size_t sizelimit, std::vector<COutPoint>* pvNoSpends
         for (auto e : stage) {
             removeUnchecked(e, MemPoolRemovalReason::SIZELIMIT);
         }
+        PublishChunkUpdate(MemPoolRemovalReason::SIZELIMIT, MemPoolUpdateCause::REMOVAL);
         if (pvNoSpendsRemaining) {
             for (const CTransaction& tx : txn) {
                 for (const CTxIn& txin : tx.vin) {
@@ -1092,11 +1246,18 @@ void CTxMemPool::ChangeSet::StageRemoval(CTxMemPool::txiter it)
     m_to_remove.insert(it);
 }
 
-void CTxMemPool::ChangeSet::Apply()
+void CTxMemPool::ChangeSet::Apply(std::optional<MemPoolObservationContext> context)
 {
     LOCK(m_pool->cs);
+    m_pool->PrepareChunkUpdate(context);
+    if (!context) m_pool->m_chunk_context.reset();
     if (!m_dependencies_processed) {
         ProcessDependencies();
+    }
+    if (m_pool->m_opts.signals && context && context->chainstate_is_current && !context->bypass_limits) {
+        for (const auto& entry : m_entry_vec) {
+            m_pool->m_fee_estimation_eligible.insert(entry->GetTx().GetWitnessHash());
+        }
     }
     m_pool->Apply(this);
     m_to_add.clear();

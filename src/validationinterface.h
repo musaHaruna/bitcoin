@@ -124,6 +124,12 @@ protected:
      *
      * The update is a captured snapshot. It need not describe the current
      * mempool by the time this callback runs.
+     * Consecutive updates reconcile the last published chunk state, including
+     * graph reordering.
+     * Ordinary block updates precede MempoolTransactionsRemovedForBlock and
+     * BlockConnected. Consumers must use the supplied observation height and
+     * advance their block clock only once. A BLOCK reason alone does not prove
+     * a complete chunk confirmation: use fully_confirmed_chunks.
      *
      * The argument is valid for the duration of this callback. Subscribers
      * retaining information afterward must copy the needed values.

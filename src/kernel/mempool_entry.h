@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -35,8 +36,30 @@ struct MemPoolChunk {
     /** Membership hash derived from the sorted wtxids; does not include fees or observation time. */
     uint256 m_chunk_hash;
 
-    MemPoolChunk(FeeFrac fee_rate, uint256 chunk_hash)
-        : m_fee_rate{fee_rate}, m_chunk_hash{chunk_hash} {}
+    /** Members have suitable admission context; no member of their cluster has a local fee delta. */
+    bool m_fee_estimation_eligible{false};
+    /** Diagnostic package size; the membership hash remains the identity. */
+    uint32_t m_member_count{1};
+
+    MemPoolChunk(FeeFrac fee_rate, uint256 chunk_hash, bool eligible = false, uint32_t members = 1)
+        : m_fee_rate{fee_rate}, m_chunk_hash{chunk_hash}, m_fee_estimation_eligible{eligible}, m_member_count{members} {}
+};
+
+/** Validation context captured while the mempool change is made. */
+struct MemPoolObservationContext {
+    unsigned int height;
+    bool chainstate_is_current{false};
+    bool bypass_limits{false};
+};
+
+/** Cause of a chunk transition, independent of transaction-removal reasons. */
+enum class MemPoolUpdateCause {
+    TRANSACTIONS,
+    REMOVAL,
+    BLOCK,
+    REORG,
+    PRIORITISATION,
+    REORDERING,
 };
 
 /**
@@ -58,10 +81,28 @@ struct MemPoolChunksUpdate {
     /** Classification of the update; producers must initialize this field. */
     MemPoolRemovalReason reason;
     /**
-     * Height of the connected block for a BLOCK update; absent otherwise.
-     * This is not the entry height of every chunk in new_chunks.
+     * Height of the connected block for a BLOCK update when supplied by
+     * validation; absent for other updates and callers without chain context.
+     * This is not the original transaction-entry height of new_chunks.
      */
     std::optional<unsigned int> block_height{std::nullopt};
+
+    /** Old chunks whose complete, exact wtxid membership occurs in this block. */
+    std::vector<uint256> fully_confirmed_chunks{};
+    /** Height when the resulting configuration became observable; absent if unknown. */
+    std::optional<unsigned int> observation_height{std::nullopt};
+    /** New observations also require this event-level freshness check. */
+    bool chainstate_is_current{false};
+    MemPoolUpdateCause cause{MemPoolUpdateCause::TRANSACTIONS};
+    /** Reorg boundary: discard pending observations; new_chunks is a full replacement snapshot. */
+    bool reset_observations{false};
+    /** Monotonic publication counter, separate from transaction/ZMQ sequence numbers. */
+    uint64_t sequence{0};
+    /** Per-old-chunk ending evidence. Block ambiguities can also name chunks
+     * unchanged by block removal (for example conflicts removed just afterward).
+     * Full inclusion above is independent of usability as a fee observation.
+     */
+    std::map<uint256, MemPoolChunkEndReason> ending_reasons{};
 };
 
 struct LockPoints {

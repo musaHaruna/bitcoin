@@ -1223,7 +1223,9 @@ void MemPoolAccept::FinalizeSubpackage(const ATMPArgs& args)
         );
         m_subpackage.m_replaced_transactions.push_back(it->GetSharedTx());
     }
-    m_subpackage.m_changeset->Apply();
+    m_subpackage.m_changeset->Apply(MemPoolObservationContext{
+        static_cast<unsigned int>(m_active_chainstate.m_chain.Height()),
+        IsCurrentForFeeEstimation(m_active_chainstate), args.m_bypass_limits});
     m_subpackage.m_changeset.reset();
 }
 
@@ -1264,7 +1266,9 @@ bool MemPoolAccept::SubmitPackage(const ATMPArgs& args, std::vector<Workspace>& 
         // This code should be unreachable; it's here as belt-and-suspenders
         // to try to ensure we have no consensus-invalid transactions in the
         // mempool.
-        m_subpackage.m_changeset->Apply();
+        m_subpackage.m_changeset->Apply(MemPoolObservationContext{
+            static_cast<unsigned int>(m_active_chainstate.m_chain.Height()),
+            IsCurrentForFeeEstimation(m_active_chainstate), args.m_bypass_limits});
         m_subpackage.m_changeset.reset();
         return false;
     }
@@ -3152,7 +3156,8 @@ bool Chainstate::ConnectTip(
     // Remove conflicting transactions from the mempool.
     std::vector<RemovedMempoolTransactionInfo> txs_removed_for_block;
     if (m_mempool) {
-        txs_removed_for_block = m_mempool->removeForBlock(block_to_connect->vtx);
+        txs_removed_for_block = m_mempool->removeForBlock(block_to_connect->vtx, MemPoolObservationContext{
+            static_cast<unsigned int>(pindexNew->nHeight), IsCurrentForFeeEstimation(*this), false});
         disconnectpool.removeForBlock(block_to_connect->vtx);
     }
     // Update m_chain & related variables.
