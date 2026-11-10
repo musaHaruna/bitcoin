@@ -8,6 +8,7 @@
 #include <consensus/amount.h>
 #include <consensus/validation.h>
 #include <core_memusage.h>
+#include <kernel/mempool_removal_reason.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <primitives/transaction.h>
@@ -21,7 +22,9 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
+#include <vector>
 
 class CBlockIndex;
 
@@ -34,6 +37,31 @@ struct MemPoolChunk {
 
     MemPoolChunk(FeeFrac fee_rate, uint256 chunk_hash)
         : m_fee_rate{fee_rate}, m_chunk_hash{chunk_hash} {}
+};
+
+/**
+ * Owned descriptions of affected mempool chunks before and after an update.
+ *
+ * The vectors describe affected clusters and may overlap. They are sorted
+ * independently; their positions do not identify corresponding chunks.
+ * A chunk appearing in old_chunks does not establish that all of its
+ * transactions were removed or confirmed.
+ *
+ * These descriptions remain usable after the source mempool entries and
+ * cached graph references are removed.
+ */
+struct MemPoolChunksUpdate {
+    /** Chunks in the affected clusters before the update. */
+    std::vector<MemPoolChunk> old_chunks;
+    /** Chunks in the affected clusters after the update. */
+    std::vector<MemPoolChunk> new_chunks;
+    /** Classification of the update; producers must initialize this field. */
+    MemPoolRemovalReason reason;
+    /**
+     * Height of the connected block for a BLOCK update; absent otherwise.
+     * This is not the entry height of every chunk in new_chunks.
+     */
+    std::optional<unsigned int> block_height{std::nullopt};
 };
 
 struct LockPoints {
