@@ -2,8 +2,11 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <consensus/validation.h>
 #include <kernel/mempool_entry.h>
 #include <kernel/mempool_removal_reason.h>
+#include <policy/fees/estimator_man.h>
+#include <primitives/block.h>
 #include <random.h>
 #include <test/util/common.h>
 #include <test/util/setup_common.h>
@@ -19,6 +22,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -865,6 +869,80 @@ BOOST_AUTO_TEST_CASE(MempoolUpdated_EmptyBlock)
     BOOST_CHECK(update.new_chunks.empty());
     BOOST_CHECK(update.fully_confirmed_chunks.empty());
     BOOST_CHECK_GT(update.sequence, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(MempoolUpdated_EstimatorManagerRouting)
+{
+    auto manager = std::make_shared<FeeRateEstimatorManager>(fs::path{}, false, fs::path{}, mpool, *m_node.chainman);
+    m_node.validation_signals->RegisterSharedValidationInterface(manager);
+    const auto counts = [&] {
+        EstimationResult result;
+        manager->BlockPolicyEstimateRawFee(1, .95, FeeEstimateHorizon::SHORT_HALFLIFE, &result);
+        return result;
+    };
+
+    const auto parent = MakeTransactionRef(ConstructTx());
+    const auto child = MakeTransactionRef(ConstructTx(COIN, COutPoint{parent->GetHash(), 0}));
+    {
+        LOCK2(cs_main, mpool.cs);
+        auto changeset = mpool.GetChangeSet();
+        // Admit both members together, producing one CPFP chunk observation.
+        changeset->StageAddition(parent, 100, 0, 100, 0, false, 0, LockPoints{});
+        changeset->StageAddition(child, 9900, 0, 100, 0, false, 0, LockPoints{});
+        BOOST_REQUIRE(changeset->CheckMemPoolPolicyLimits());
+        changeset->Apply(MemPoolObservationContext{100, true, false});
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK_EQUAL(counts().active_observations, 1U);
+    auto coinbase = ConstructTx();
+    coinbase.vin[0].prevout.SetNull();
+    auto block = std::make_shared<CBlock>();
+    block->vtx = {MakeTransactionRef(coinbase), parent, child};
+    const auto removed = BlockRemoval(block->vtx, 101);
+    BOOST_REQUIRE_EQUAL(removed.size(), 2U);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    const auto confirmed = counts();
+    BOOST_CHECK_EQUAL(confirmed.active_observations, 0U);
+    BOOST_CHECK_EQUAL(confirmed.all.success, 1);
+    BOOST_CHECK_EQUAL(confirmed.all.Total(), 1);
+    BOOST_CHECK(manager->MempoolPolicyEstimatorBlocksStats().empty());
+
+    // The older signal carries two transactions to the mempool-policy estimator,
+    // but must not add observations or resolve the block-policy chunk twice.
+    m_node.validation_signals->MempoolTransactionsRemovedForBlock(block, removed, 101);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    const auto after_removed = counts();
+    BOOST_CHECK_EQUAL(after_removed.all.success, confirmed.all.success);
+    BOOST_CHECK_EQUAL(after_removed.all.Total(), confirmed.all.Total());
+    BOOST_CHECK(after_removed.endings == confirmed.endings);
+    auto stats = manager->MempoolPolicyEstimatorBlocksStats();
+    BOOST_REQUIRE_EQUAL(stats.size(), 1U);
+    BOOST_CHECK_EQUAL(stats.back().m_height, 101U);
+    const auto weight = GetTransactionWeight(*parent) + GetTransactionWeight(*child);
+    BOOST_CHECK_EQUAL(stats.back().m_removed_block_txs_weight, weight);
+    BOOST_CHECK_EQUAL(stats.back().m_block_weight, weight);
+
+    // With no local transactions mined, the chunk stream still advances the
+    // block-policy clock. The older signal must not apply a second decay.
+    auto empty_block = std::make_shared<CBlock>();
+    empty_block->vtx = {MakeTransactionRef(coinbase)};
+    BlockRemoval(empty_block->vtx, 102);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    const auto after_empty = counts();
+    BOOST_CHECK_CLOSE(after_empty.all.success, confirmed.all.success * confirmed.decay, 1e-10);
+    BOOST_CHECK(after_empty.endings == confirmed.endings);
+    m_node.validation_signals->MempoolTransactionsRemovedForBlock(empty_block, {}, 102);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    const auto after_empty_removed = counts();
+    BOOST_CHECK_EQUAL(after_empty_removed.all.success, after_empty.all.success);
+    BOOST_CHECK_EQUAL(after_empty_removed.all.Total(), after_empty.all.Total());
+    BOOST_CHECK(after_empty_removed.endings == after_empty.endings);
+    stats = manager->MempoolPolicyEstimatorBlocksStats();
+    BOOST_REQUIRE_EQUAL(stats.size(), 2U);
+    BOOST_CHECK_EQUAL(stats.back().m_height, 102U);
+    BOOST_CHECK_EQUAL(stats.back().m_removed_block_txs_weight, 0U);
+    BOOST_CHECK_EQUAL(stats.back().m_block_weight, 0U);
+    m_node.validation_signals->UnregisterSharedValidationInterface(manager);
 }
 
 BOOST_AUTO_TEST_CASE(MempoolUpdated_Prioritisation)

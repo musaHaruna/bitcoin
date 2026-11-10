@@ -12,6 +12,7 @@
 #include <test/fuzz/util/reachability.h>
 #include <test/util/setup_common.h>
 
+#include <cstdio>
 #include <memory>
 
 namespace {
@@ -35,10 +36,31 @@ FUZZ_TARGET(policy_estimator_io, .init = initialize_policy_estimator_io)
     static CBlockPolicyEstimator block_policy_estimator{
         BlockPolicyFeeEstPath(*g_setup->m_node.args), DEFAULT_ACCEPT_STALE_FEE_ESTIMATES};
     bool block_policy_read_success{false};
+    // FuzzedFileProvider is unavailable on some platforms (including macOS).
+    // Also exercise a real file: either arbitrary bytes or a valid snapshot
+    // with optional byte mutations, so successful reads remain reachable.
+    {
+        AutoFile real_file{std::tmpfile()};
+        assert(!real_file.IsNull());
+        if (fuzzed_data_provider.ConsumeBool()) {
+            assert(block_policy_estimator.Write(real_file));
+            const auto size{real_file.tell()};
+            for (int mutations{fuzzed_data_provider.ConsumeIntegralInRange<int>(0, 8)}; mutations > 0; --mutations) {
+                real_file.seek(fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(0, size - 1), SEEK_SET);
+                real_file << fuzzed_data_provider.ConsumeIntegral<uint8_t>();
+            }
+        } else {
+            real_file.write(std::as_bytes(buffer));
+        }
+        real_file.seek(0, SEEK_SET);
+        block_policy_read_success = block_policy_estimator.Read(real_file);
+        (void)real_file.fclose();
+    }
     {
         AutoFile fuzzed_auto_file_block_policy{fuzzed_file_provider.open()};
-        block_policy_read_success = block_policy_estimator.Read(fuzzed_auto_file_block_policy);
-        if (block_policy_read_success) {
+        const bool read_success{block_policy_estimator.Read(fuzzed_auto_file_block_policy)};
+        block_policy_read_success |= read_success;
+        if (read_success) {
             block_policy_estimator.Write(fuzzed_auto_file_block_policy);
         }
         (void)fuzzed_auto_file_block_policy.fclose();

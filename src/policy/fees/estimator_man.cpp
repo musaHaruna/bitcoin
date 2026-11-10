@@ -76,19 +76,15 @@ std::vector<MinedBlockStats> FeeRateEstimatorManager::MempoolPolicyEstimatorBloc
     return m_mempool_estimator->GetPrevBlockData();
 }
 
-void FeeRateEstimatorManager::TransactionAddedToMempool(const NewMempoolTransactionInfo& tx, uint64_t /*unused*/)
+void FeeRateEstimatorManager::MempoolUpdated(const MemPoolChunksUpdate& update)
 {
-    m_block_policy_estimator->processTransaction(tx);
-}
-
-void FeeRateEstimatorManager::TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason /*unused*/, uint64_t /*unused*/)
-{
-    m_block_policy_estimator->removeTx(tx->GetHash());
+    // This stream includes empty block boundaries, so it is also the block
+    // estimator's clock. The older transaction callbacks must not update it.
+    m_block_policy_estimator->processMempoolUpdate(update);
 }
 
 void FeeRateEstimatorManager::MempoolTransactionsRemovedForBlock(const std::shared_ptr<const CBlock>& block, const std::vector<RemovedMempoolTransactionInfo>& txs_removed_for_block, unsigned int block_height)
 {
-    m_block_policy_estimator->processBlock(txs_removed_for_block, block_height);
     m_mempool_estimator->MempoolTxsRemovedForBlock(block, txs_removed_for_block, block_height);
 }
 
