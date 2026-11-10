@@ -59,6 +59,12 @@ void CTxMemPool::PrepareChunkUpdate(std::optional<MemPoolObservationContext> con
 {
     AssertLockHeld(cs);
     if (!m_opts.signals) return;
+    // Fresh validation evidence can invalidate a cached freshness decision.
+    // Keep the preceding height for lazy changes, but do not start new samples
+    // from them after learning that the node is behind.
+    if (context && !context->chainstate_is_current && m_chunk_context) {
+        m_chunk_context->chainstate_is_current = false;
+    }
     // Inspectors can perform lazy graph maintenance between mutations. Publish
     // those changes at the preceding height before changing the observation clock.
     if (!m_chunk_reorg) {
@@ -1100,11 +1106,11 @@ bool CTxMemPool::CheckPolicyLimits(const CTransactionRef& tx)
     return changeset->CheckMemPoolPolicyLimits();
 }
 
-int CTxMemPool::Expire(std::chrono::seconds time)
+int CTxMemPool::Expire(std::chrono::seconds time, std::optional<MemPoolObservationContext> context)
 {
     AssertLockHeld(cs);
     Assume(!m_have_changeset);
-    PrepareChunkUpdate();
+    PrepareChunkUpdate(context);
     indexed_transaction_set::index<entry_time>::type::iterator it = mapTx.get<entry_time>().begin();
     setEntries toremove;
     while (it != mapTx.get<entry_time>().end() && it->GetTime() < time) {
@@ -1152,10 +1158,11 @@ void CTxMemPool::trackPackageRemoved(const CFeeRate& rate) {
     }
 }
 
-void CTxMemPool::TrimToSize(size_t sizelimit, std::vector<COutPoint>* pvNoSpendsRemaining) {
+void CTxMemPool::TrimToSize(size_t sizelimit, std::vector<COutPoint>* pvNoSpendsRemaining,
+                           std::optional<MemPoolObservationContext> context) {
     AssertLockHeld(cs);
     Assume(!m_have_changeset);
-    PrepareChunkUpdate();
+    PrepareChunkUpdate(context);
 
     unsigned nTxnRemoved = 0;
     CFeeRate maxFeeRateRemoved(0);

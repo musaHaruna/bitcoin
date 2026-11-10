@@ -471,11 +471,14 @@ public:
     /** Remove transactions from the mempool until its dynamic size is <= sizelimit.
       *  pvNoSpendsRemaining, if set, will be populated with the list of outpoints
       *  which are not in mempool which no longer have any spends in this mempool.
+      *  Validation callers supply fresh context for any resulting chunk observations.
       */
-    void TrimToSize(size_t sizelimit, std::vector<COutPoint>* pvNoSpendsRemaining = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void TrimToSize(size_t sizelimit, std::vector<COutPoint>* pvNoSpendsRemaining = nullptr,
+                    std::optional<MemPoolObservationContext> context = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
-    /** Expire all transaction (and their dependencies) in the mempool older than time. Return the number of removed transactions. */
-    int Expire(std::chrono::seconds time) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    /** Expire transactions (and their dependencies) older than time and return the number removed.
+     *  Validation callers supply fresh context for any resulting chunk observations. */
+    int Expire(std::chrono::seconds time, std::optional<MemPoolObservationContext> context = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /**
      * Calculate the ancestor and cluster count for the given transaction.
