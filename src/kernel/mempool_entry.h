@@ -12,6 +12,8 @@
 #include <policy/settings.h>
 #include <primitives/transaction.h>
 #include <txgraph.h>
+#include <uint256.h>
+#include <util/feefrac.h>
 #include <util/overflow.h>
 #include <util/time.h>
 
@@ -22,6 +24,17 @@
 #include <set>
 
 class CBlockIndex;
+
+/** An owned chunk description that remains usable after its mempool entries are removed. */
+struct MemPoolChunk {
+    /** Total modified fee and sigops-adjusted weight of the chunk. */
+    FeeFrac m_fee_rate;
+    /** Membership hash derived from the sorted wtxids; does not include fees or observation time. */
+    uint256 m_chunk_hash;
+
+    MemPoolChunk(FeeFrac fee_rate, uint256 chunk_hash)
+        : m_fee_rate{fee_rate}, m_chunk_hash{chunk_hash} {}
+};
 
 struct LockPoints {
     // Will be set to the blockchain height and median time past
