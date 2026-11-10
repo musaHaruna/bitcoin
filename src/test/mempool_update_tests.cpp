@@ -11,6 +11,7 @@
 #include <txmempool.h>
 #include <util/hasher.h>
 #include <util/time.h>
+#include <util/translation.h>
 #include <validation.h>
 #include <validationinterface.h>
 
@@ -499,6 +500,79 @@ BOOST_AUTO_TEST_CASE(MempoolUpdated_Reorg)
     BOOST_CHECK(mpool.exists(valid_tx.GetHash()));
 }
 
+BOOST_AUTO_TEST_CASE(MempoolUpdated_ReorgDiscardsBlockEvidence)
+{
+    TestMemPoolEntryHelper entry;
+    const auto tx = ConstructTx();
+    auto conflict = tx;
+    conflict.vout[0].nValue -= 1;
+    AddWithContext(entry.Fee(1000).FromTx(tx), {100, true, false});
+    {
+        LOCK2(cs_main, mpool.cs);
+        mpool.BeginChunkReorg(100);
+        mpool.removeForBlock({MakeTransactionRef(conflict)}, MemPoolObservationContext{101, true, false});
+        mpool.EndChunkReorg({101, true, false});
+        // A second reorg disconnects the conflicting block before any ordinary
+        // block notification can consume the first reorg's evidence.
+        mpool.BeginChunkReorg(101);
+        mpool.EndChunkReorg({100, true, false});
+    }
+    BOOST_CHECK(!mpool.exists(tx.GetHash()));
+    // The transaction is valid again and relayed normally. Its new observation
+    // has the same membership hash but must not inherit the old conflict.
+    AddWithContext(entry.Fee(1000).FromTx(tx), {100, true, false});
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    listener.Clear();
+    BlockRemoval({MakeTransactionRef(tx)}, 101);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE_EQUAL(listener.updates.size(), 1U);
+    const auto& update = listener.updates.front();
+    const auto hash = ExpectedChunkHash({tx});
+    BOOST_CHECK(update.cause == MemPoolUpdateCause::BLOCK);
+    BOOST_REQUIRE_EQUAL(update.old_chunks.size(), 1U);
+    BOOST_CHECK(update.old_chunks.front().m_fee_estimation_eligible);
+    BOOST_REQUIRE_EQUAL(update.fully_confirmed_chunks.size(), 1U);
+    BOOST_CHECK_EQUAL(update.fully_confirmed_chunks.front(), hash);
+    BOOST_REQUIRE(update.ending_reasons.contains(hash));
+    BOOST_CHECK(update.ending_reasons.at(hash) == MemPoolChunkEndReason::CONFIRMED);
+}
+
+BOOST_AUTO_TEST_CASE(MempoolUpdated_ReorgDiscardsBlockEvidenceBeforeTrimming)
+{
+    TestMemPoolEntryHelper entry;
+    const auto tx = ConstructTx();
+    const auto survivor = ConstructTx();
+    auto conflict = tx;
+    conflict.vout[0].nValue -= 1;
+    bilingual_str error;
+    CTxMemPool reference{mpool.m_opts, error};
+    BOOST_REQUIRE(error.empty());
+    // Identical histories make the ordinary block removal a portable memory
+    // budget for the same surviving mempool after reorg reconstruction.
+    for (auto* pool : {&reference, &mpool}) {
+        LOCK2(cs_main, pool->cs);
+        TryAddToMempool(*pool, entry.Fee(1000).FromTx(tx));
+        TryAddToMempool(*pool, entry.Fee(2000).FromTx(survivor));
+    }
+    {
+        LOCK2(cs_main, reference.cs);
+        reference.removeForBlock({MakeTransactionRef(conflict)}, MemPoolObservationContext{101, true, false});
+    }
+    BOOST_REQUIRE_EQUAL(reference.size(), 1U);
+    const auto budget = reference.DynamicMemoryUsage();
+    {
+        LOCK2(cs_main, mpool.cs);
+        mpool.BeginChunkReorg(100);
+        mpool.removeForBlock({MakeTransactionRef(conflict)}, MemPoolObservationContext{101, true, false});
+        mpool.EndChunkReorg({101, true, false});
+        BOOST_REQUIRE_EQUAL(mpool.size(), 1U);
+        BOOST_CHECK_EQUAL(mpool.DynamicMemoryUsage(), budget);
+        mpool.TrimToSize(budget);
+        BOOST_CHECK(mpool.exists(survivor.GetHash()));
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+}
+
 // Simulate a scenario where a reorg causes a tx to be added to the mempool
 // and connected to a cluster; this connection causes mempool limits to be exceeded.
 // In production this happens in MaybeUpdateMempoolForReorg:
@@ -791,6 +865,55 @@ BOOST_AUTO_TEST_CASE(MempoolUpdated_EmptyBlock)
     BOOST_CHECK(update.new_chunks.empty());
     BOOST_CHECK(update.fully_confirmed_chunks.empty());
     BOOST_CHECK_GT(update.sequence, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(MempoolUpdated_UnseenSponsorPropagatesThroughKnownChild)
+{
+    TestMemPoolEntryHelper entry;
+    const auto parent = ConstructTx();
+    const auto child = ConstructTx(90'000, COutPoint{parent.GetHash(), 0});
+    const auto sponsor = ConstructTx(80'000, COutPoint{child.GetHash(), 0});
+    const auto independent = ConstructTx();
+    AddWithContext(entry.Fee(100).FromTx(parent), {100, true, false});
+    AddWithContext(entry.Fee(100).FromTx(child), {100, true, false});
+    AddWithContext(entry.Fee(1000).FromTx(independent), {100, true, false});
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    listener.Clear();
+    BlockRemoval({MakeTransactionRef(parent), MakeTransactionRef(child), MakeTransactionRef(sponsor), MakeTransactionRef(independent)}, 101);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    const auto block = std::ranges::find_if(listener.updates, [](const auto& update) { return update.cause == MemPoolUpdateCause::BLOCK; });
+    BOOST_REQUIRE(block != listener.updates.end());
+    BOOST_REQUIRE(!block->fully_confirmed_chunks.empty());
+    const auto independent_hash = ExpectedChunkHash({independent});
+    for (const auto& hash : block->fully_confirmed_chunks) {
+        BOOST_REQUIRE(block->ending_reasons.contains(hash));
+        BOOST_CHECK(block->ending_reasons.at(hash) == (hash == independent_hash ? MemPoolChunkEndReason::CONFIRMED : MemPoolChunkEndReason::UNSEEN_SPONSOR));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(MempoolUpdated_PartialAndConflictEvidencePrecedesRemoval)
+{
+    TestMemPoolEntryHelper entry;
+    const auto parent = ConstructTx();
+    const auto child = ConstructTx(90'000, COutPoint{parent.GetHash(), 0});
+    AddWithContext(entry.Fee(100).FromTx(parent), {100, true, false});
+    AddWithContext(entry.Fee(9900).FromTx(child), {100, true, false});
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    listener.Clear();
+    BlockRemoval({MakeTransactionRef(parent)}, 101);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE(!listener.updates.empty());
+    BOOST_CHECK(listener.updates.front().ending_reasons.at(ExpectedChunkHash({parent, child})) == MemPoolChunkEndReason::PARTIAL_CONFIRMATION);
+    listener.Clear();
+    auto conflict = child;
+    conflict.vout[0].nValue -= 1;
+    BlockRemoval({MakeTransactionRef(conflict)}, 102);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE(!listener.updates.empty());
+    // This block has no locally mined transaction. The child is still named
+    // before the later non-block notification actually removes the conflict.
+    BOOST_CHECK(listener.updates.front().cause == MemPoolUpdateCause::BLOCK);
+    BOOST_CHECK(listener.updates.front().ending_reasons.at(ExpectedChunkHash({child})) == MemPoolChunkEndReason::BLOCK_CONFLICT);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

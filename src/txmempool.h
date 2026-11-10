@@ -748,6 +748,8 @@ private:
     std::map<uint256, PublishedChunk> m_published_chunks GUARDED_BY(cs);
     std::map<Wtxid, uint256> m_published_chunk_by_wtxid GUARDED_BY(cs);
     std::map<Wtxid, MemPoolRemovalReason> m_removed_chunk_wtxids GUARDED_BY(cs);
+    /** Evidence collected from the intact pre-block mempool. */
+    std::map<uint256, MemPoolChunkEndReason> m_block_chunk_endings GUARDED_BY(cs);
     std::set<Wtxid> m_fee_estimation_eligible GUARDED_BY(cs);
     size_t m_published_members_usage GUARDED_BY(cs){0};
     uint64_t m_chunk_update_sequence GUARDED_BY(cs){0};

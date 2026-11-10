@@ -130,7 +130,8 @@ protected:
      * Ordinary block updates precede MempoolTransactionsRemovedForBlock and
      * BlockConnected. Consumers must use the supplied observation height and
      * advance their block clock only once. A BLOCK reason alone does not prove
-     * a complete chunk confirmation: use fully_confirmed_chunks.
+     * full inclusion: use fully_confirmed_chunks. Check ending_reasons to
+     * determine whether that inclusion is usable for fee estimation.
      *
      * The argument is valid for the duration of this callback. Subscribers
      * retaining information afterward must copy the needed values.

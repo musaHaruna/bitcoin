@@ -130,6 +130,8 @@ void CTxMemPool::PublishChunkUpdate(MemPoolRemovalReason reason, MemPoolUpdateCa
     std::set<Wtxid> block_members;
     if (block_txs) {
         for (const auto& tx : *block_txs) block_members.insert(tx->GetWitnessHash());
+        update.ending_reasons = std::move(m_block_chunk_endings);
+        m_block_chunk_endings.clear();
     }
     for (const auto& hash : old_hashes) {
         const auto it = m_published_chunks.find(hash);
@@ -160,6 +162,7 @@ void CTxMemPool::PublishChunkUpdate(MemPoolRemovalReason reason, MemPoolUpdateCa
                 ending = MemPoolChunkEndReason::PARTIAL_CONFIRMATION;
             }
         }
+        // Pre-block evidence of sponsorship/conflict takes precedence over inclusion.
         update.ending_reasons.try_emplace(hash, ending);
         for (const auto& member : old.members) m_published_chunk_by_wtxid.erase(member);
         m_published_members_usage -= memusage::DynamicUsage(old.members);
@@ -203,6 +206,8 @@ void CTxMemPool::BeginChunkReorg(unsigned int height)
 void CTxMemPool::EndChunkReorg(MemPoolObservationContext context)
 {
     AssertLockHeld(cs);
+    // Intermediate block evidence belongs to observations discarded by this reset.
+    m_block_chunk_endings.clear();
     m_chunk_context = context;
     m_chunk_reorg = false;
     PublishChunkUpdate(MemPoolRemovalReason::REORG, MemPoolUpdateCause::REORG,
@@ -585,6 +590,36 @@ std::vector<RemovedMempoolTransactionInfo> CTxMemPool::removeForBlock(const std:
     Assume(!m_have_changeset);
     PrepareChunkUpdate(context);
     if (!context) m_chunk_context.reset();
+    if (m_opts.signals) {
+        // Validated blocks are topologically ordered. Walk backward so an unseen
+        // descendant taints every in-block ancestor, including paths through known
+        // children. Do this before removing any of the pre-block mempool entries.
+        std::set<Txid> sponsored;
+        std::vector<const TxGraph::Ref*> conflicts;
+        for (auto tx = vtx.rbegin(); tx != vtx.rend(); ++tx) {
+            const auto local = mapTx.find((*tx)->GetHash());
+            const bool unseen = local == mapTx.end() || local->GetTx().GetWitnessHash() != (*tx)->GetWitnessHash();
+            if (unseen || sponsored.contains((*tx)->GetHash())) {
+                for (const auto& input : (*tx)->vin) sponsored.insert(input.prevout.hash);
+            }
+            for (const auto& input : (*tx)->vin) {
+                const auto spender = mapNextTx.find(input.prevout);
+                if (spender != mapNextTx.end() && spender->second->GetTx().GetHash() != (*tx)->GetHash()) {
+                    conflicts.push_back(&*spender->second);
+                }
+            }
+        }
+        const auto mark = [&](const CTxMemPoolEntry& entry, MemPoolChunkEndReason ending) EXCLUSIVE_LOCKS_REQUIRED(cs) {
+            const auto published = m_published_chunk_by_wtxid.find(entry.GetTx().GetWitnessHash());
+            if (published != m_published_chunk_by_wtxid.end()) m_block_chunk_endings[published->second] = ending;
+        };
+        for (const auto& txid : sponsored) {
+            if (const auto entry = mapTx.find(txid); entry != mapTx.end()) mark(*entry, MemPoolChunkEndReason::UNSEEN_SPONSOR);
+        }
+        for (const auto* ref : m_txgraph->GetDescendantsUnion(conflicts, TxGraph::Level::MAIN)) {
+            mark(static_cast<const CTxMemPoolEntry&>(*ref), MemPoolChunkEndReason::BLOCK_CONFLICT);
+        }
+    }
     std::vector<RemovedMempoolTransactionInfo> txs_removed_for_block;
     if (mapTx.size() || mapNextTx.size() || mapDeltas.size()) {
         txs_removed_for_block.reserve(vtx.size());
@@ -1015,6 +1050,7 @@ size_t CTxMemPool::DynamicMemoryUsage() const {
     return memusage::MallocUsage(sizeof(CTxMemPoolEntry) + 9 * sizeof(void*)) * mapTx.size() + memusage::DynamicUsage(mapNextTx) + memusage::DynamicUsage(mapDeltas) + memusage::DynamicUsage(txns_randomized) + memusage::DynamicUsage(m_unbroadcast_txids) + m_txgraph->GetMainMemoryUsage() + cachedInnerUsage
         + memusage::DynamicUsage(m_published_chunks) + memusage::DynamicUsage(m_published_chunk_by_wtxid)
         + memusage::DynamicUsage(m_removed_chunk_wtxids) + memusage::DynamicUsage(m_fee_estimation_eligible)
+        + memusage::DynamicUsage(m_block_chunk_endings)
         + m_published_members_usage;
 }
 
