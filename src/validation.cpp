@@ -301,6 +301,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
     AssertLockHeld(cs_main);
     AssertLockHeld(m_mempool->cs);
+    m_mempool->BeginChunkReorg(static_cast<unsigned int>(Assert(m_chain.Tip())->nHeight));
     std::vector<Txid> vHashUpdate;
     {
         // disconnectpool is ordered so that the front is the most recently-confirmed
@@ -385,7 +386,11 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
     // We also need to remove any now-immature transactions
     m_mempool->removeForReorg(m_chain, filter_final_and_mature);
-    // Re-limit mempool size, in case we added any transactions
+    // Reconcile owned publication records before checking memory limits, so
+    // snapshots of removed transactions cannot cause unnecessary evictions.
+    m_mempool->EndChunkReorg(MemPoolObservationContext{
+        static_cast<unsigned int>(m_chain.Height()), IsCurrentForFeeEstimation(*this), false});
+    // Re-limit mempool size, in case we added any transactions.
     LimitMempoolSize(*m_mempool, this->CoinsTip());
 }
 
@@ -3055,6 +3060,9 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         return false;
     }
 
+    if (m_mempool) {
+        m_mempool->BeginChunkReorg(static_cast<unsigned int>(pindexDelete->pprev->nHeight));
+    }
     if (disconnectpool && m_mempool) {
         // Save transactions to re-add to mempool at end of reorg. If any entries are evicted for
         // exceeding memory limits, remove them and their descendants from the mempool.

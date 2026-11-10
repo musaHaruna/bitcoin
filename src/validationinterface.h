@@ -125,7 +125,8 @@ protected:
      * The update is a captured snapshot. It need not describe the current
      * mempool by the time this callback runs.
      * Consecutive updates reconcile the last published chunk state, including
-     * graph reordering.
+     * graph reordering. Reorg reconstruction is batched;
+     * a reset event replaces pending observations with its full new snapshot.
      * Ordinary block updates precede MempoolTransactionsRemovedForBlock and
      * BlockConnected. Consumers must use the supplied observation height and
      * advance their block clock only once. A BLOCK reason alone does not prove

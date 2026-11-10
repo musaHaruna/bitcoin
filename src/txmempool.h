@@ -332,6 +332,10 @@ public:
     void removeForReorg(CChain& chain, std::function<bool(txiter)> filter_final_and_mature) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
     std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& vtx, std::optional<MemPoolObservationContext> context = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
+    /** Batch reorg reconstruction into one coherent publication after dependency repair. */
+    void BeginChunkReorg(unsigned int height) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void EndChunkReorg(MemPoolObservationContext context) EXCLUSIVE_LOCKS_REQUIRED(cs);
+
     /** Look up wtxids in the mempool and (partially) sort by mining score.
      *
      * The @p n_to_sort best entries are removed from @p wtxids and their
@@ -748,11 +752,12 @@ private:
     size_t m_published_members_usage GUARDED_BY(cs){0};
     uint64_t m_chunk_update_sequence GUARDED_BY(cs){0};
     std::optional<MemPoolObservationContext> m_chunk_context GUARDED_BY(cs);
+    bool m_chunk_reorg GUARDED_BY(cs){false};
 
     void PrepareChunkUpdate(std::optional<MemPoolObservationContext> context = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(cs);
     void PublishChunkUpdate(MemPoolRemovalReason reason, MemPoolUpdateCause cause,
                             const std::vector<CTransactionRef>* block_txs = nullptr,
-                            bool force = false) EXCLUSIVE_LOCKS_REQUIRED(cs);
+                            bool force = false, bool reset = false) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     // Apply the given changeset to the mempool, by removing transactions in
     // the to_remove set and adding transactions in the to_add set.

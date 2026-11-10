@@ -459,6 +459,120 @@ BOOST_AUTO_TEST_CASE(MempoolUpdated_RemoveRecursive)
     BOOST_CHECK(mpool.exists(independent_tx.GetHash()));
 }
 
+BOOST_AUTO_TEST_CASE(MempoolUpdated_Reorg)
+{
+    TestMemPoolEntryHelper entry;
+    auto tx_to_invalidate = ConstructTx();
+    auto valid_tx = ConstructTx();
+    CAmount fee{1000};
+    int32_t size{entry.Fee(fee).FromTx(tx_to_invalidate).GetAdjustedWeight()};
+    FeeFrac expected_fee_rate{fee, size};
+    {
+        LOCK2(cs_main, mpool.cs);
+        TryAddToMempool(mpool, entry.Fee(fee).FromTx(tx_to_invalidate));
+        TryAddToMempool(mpool, entry.Fee(1000).FromTx(valid_tx));
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    listener.Clear();
+    const Txid tx_to_invalidate_txid = tx_to_invalidate.GetHash();
+    {
+        LOCK2(cs_main, mpool.cs);
+        auto& chainstate = m_node.chainman->ActiveChainstate();
+        mpool.removeForReorg(chainstate.m_chain, [&](CTxMemPool::txiter it)
+                                                     EXCLUSIVE_LOCKS_REQUIRED(mpool.cs, ::cs_main) {
+                                                         AssertLockHeld(mpool.cs);
+                                                         AssertLockHeld(::cs_main);
+                                                         return it->GetTx().GetHash() == tx_to_invalidate_txid;
+                                                     });
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE_EQUAL(listener.updates.size(), 1U);
+    BOOST_REQUIRE_EQUAL(listener.updates[0].old_chunks.size(), 1U);
+    const auto& chunk = listener.updates[0].old_chunks[0];
+    BOOST_CHECK_EQUAL(chunk.m_chunk_hash, ExpectedChunkHash({tx_to_invalidate}));
+    BOOST_CHECK(chunk.m_fee_rate == expected_fee_rate);
+    BOOST_CHECK(listener.updates[0].new_chunks.empty());
+    BOOST_CHECK(listener.updates[0].reason == MemPoolRemovalReason::REORG);
+    BOOST_CHECK(listener.updates[0].cause == MemPoolUpdateCause::REORG);
+    BOOST_CHECK(!listener.updates[0].block_height.has_value());
+    BOOST_CHECK(!mpool.exists(tx_to_invalidate.GetHash()));
+    BOOST_CHECK(mpool.exists(valid_tx.GetHash()));
+}
+
+// Simulate a scenario where a reorg causes a tx to be added to the mempool
+// and connected to a cluster; this connection causes mempool limits to be exceeded.
+// In production this happens in MaybeUpdateMempoolForReorg:
+// txs are added via AcceptToMemoryPool, then UpdateTransactionsFromBlock
+// connects the parent->child dependency.
+//
+// Here chain[1..cluster_limit] are in-mempool and connected to a tx in a block, but the
+// reorg does not include the parent of chain[1..cluster_limit].
+// chain[0] is then added independently as a cluster of 1. UpdateTransactionsFromBlock scans
+// the mempool for txs that spend an output of chain[0], finds chain[1], and calls AddDependency
+// merging both clusters into one of size cluster_limit+1, which exceeds the limit.
+// Trim() evicts the lowest-fee tail tx.
+BOOST_AUTO_TEST_CASE(MempoolUpdated_UpdateTransactionsFromBlock)
+{
+    TestMemPoolEntryHelper entry;
+    const int chain_len{static_cast<int>(mpool.m_opts.limits.cluster_count + 1)};
+    std::vector<CMutableTransaction> chain;
+    chain.reserve(chain_len);
+    std::vector<Txid> txids;
+    chain.push_back(ConstructTx()); // chain[0] — the re-added parent
+    for (int i = 1; i < chain_len; ++i) {
+        chain.push_back(ConstructTx(1 * COIN, COutPoint{chain[i - 1].GetHash(), 0}));
+    }
+    CAmount normal_fee{1000};
+    CAmount low_fee{100};
+    int32_t last_tx_size{0};
+    {
+        LOCK2(cs_main, mpool.cs);
+        for (int i = 1; i < chain_len; ++i) {
+            CAmount fee = (i == chain_len - 1) ? low_fee : normal_fee;
+            auto curr_entry = entry.Fee(fee).FromTx(chain[i]);
+            if (i == chain_len - 1) last_tx_size = curr_entry.GetAdjustedWeight();
+            TryAddToMempool(mpool, curr_entry);
+        }
+        auto root_entry = entry.Fee(normal_fee).FromTx(chain[0]);
+        TryAddToMempool(mpool, root_entry);
+        txids.push_back(chain[0].GetHash());
+    }
+    // Verify the two clusters are independent before UpdateTransactionsFromBlock.
+    BOOST_CHECK_EQUAL(WITH_LOCK(mpool.cs, return mpool.GetCluster(chain[0].GetHash()).size()), 1);
+    BOOST_CHECK_EQUAL(WITH_LOCK(mpool.cs, return mpool.GetCluster(chain[1].GetHash()).size()), chain_len - 1);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    listener.Clear();
+    {
+        LOCK2(cs_main, mpool.cs);
+        // Scans mapNextTx for chain[0]'s outputs, finds chain[1], calls
+        // AddDependency(chain[0], chain[1]). Merged cluster = chain_len > limit.
+        // Trim() evicts the lowest-fee tail tx (chain.back()).
+        mpool.UpdateTransactionsFromBlock(txids);
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    // Both clusters are now merged (minus the evicted tail tx).
+    BOOST_CHECK_EQUAL(WITH_LOCK(mpool.cs, return mpool.GetCluster(chain[0].GetHash()).size()), chain_len - 1);
+    BOOST_CHECK_EQUAL(WITH_LOCK(mpool.cs, return mpool.GetCluster(chain[1].GetHash()).size()), chain_len - 1);
+    BOOST_REQUIRE_EQUAL(listener.updates.size(), 1U);
+    const auto& update = listener.updates[0];
+    BOOST_CHECK(update.reason == MemPoolRemovalReason::SIZELIMIT);
+    BOOST_CHECK(update.cause == MemPoolUpdateCause::REORG);
+    BOOST_CHECK(!update.block_height.has_value());
+    // old_chunks: the two pre-dependency MAIN clusters, including the low-fee tail tx.
+    BOOST_REQUIRE(!update.old_chunks.empty());
+    const auto& evicted_chunk = update.old_chunks.back();
+    BOOST_CHECK_EQUAL(evicted_chunk.m_chunk_hash, ExpectedChunkHash({chain.back()}));
+    BOOST_CHECK(evicted_chunk.m_fee_rate == FeeFrac(low_fee, last_tx_size));
+    // new_chunks: the merged cluster after eviction — excludes the low-fee tail tx.
+    BOOST_REQUIRE(!update.new_chunks.empty());
+    BOOST_REQUIRE_EQUAL(update.new_chunks.size(), update.old_chunks.size() - 1);
+    BOOST_CHECK(!mpool.exists(chain.back().GetHash()));
+    // All other txs must still be present.
+    for (int i = 0; i < chain_len - 1; ++i) {
+        BOOST_CHECK(mpool.exists(chain[i].GetHash()));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(MempoolUpdated_UnchangedChunk)
 {
     TestMemPoolEntryHelper entry;
@@ -531,6 +645,50 @@ BOOST_AUTO_TEST_CASE(MempoolUpdated_FullChunkBlockRemoval)
     BOOST_CHECK(update.old_chunks[0].m_fee_rate == chunk_rate);
     BOOST_CHECK(!mpool.exists(parent_tx.GetHash()));
     BOOST_CHECK(!mpool.exists(child_tx.GetHash()));
+}
+
+BOOST_AUTO_TEST_CASE(MempoolUpdated_DependencyConnectionWithoutEviction)
+{
+    TestMemPoolEntryHelper entry;
+    auto parent_tx = ConstructTx();
+    auto child_tx = ConstructTx(1 * COIN, COutPoint{parent_tx.GetHash(), 0});
+    const auto parent_entry = entry.Fee(100).FromTx(parent_tx);
+    const auto child_entry = entry.Fee(10000).FromTx(child_tx);
+    const FeeFrac parent_rate{100, parent_entry.GetAdjustedWeight()};
+    const FeeFrac child_rate{10000, child_entry.GetAdjustedWeight()};
+    const FeeFrac combined_rate{10100, parent_entry.GetAdjustedWeight() + child_entry.GetAdjustedWeight()};
+    {
+        LOCK2(cs_main, mpool.cs);
+        // Add the child while the parent is absent, then restore the parent.
+        TryAddToMempool(mpool, child_entry);
+        TryAddToMempool(mpool, parent_entry);
+    }
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(mpool.cs, return mpool.GetCluster(parent_tx.GetHash()).size()), 1U);
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(mpool.cs, return mpool.GetCluster(child_tx.GetHash()).size()), 1U);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    listener.Clear();
+    {
+        LOCK2(cs_main, mpool.cs);
+        mpool.UpdateTransactionsFromBlock({parent_tx.GetHash()});
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE_EQUAL(listener.updates.size(), 1U);
+    const auto& update = listener.updates[0];
+    // Dependency restoration is a reorg transition even when no eviction occurs.
+    BOOST_CHECK(update.reason == MemPoolRemovalReason::SIZELIMIT);
+    BOOST_CHECK(update.cause == MemPoolUpdateCause::REORG);
+    BOOST_CHECK(!update.block_height.has_value());
+    BOOST_REQUIRE_EQUAL(update.old_chunks.size(), 2U);
+    BOOST_REQUIRE_EQUAL(update.new_chunks.size(), 1U);
+    BOOST_CHECK_EQUAL(update.old_chunks[0].m_chunk_hash, ExpectedChunkHash({child_tx}));
+    BOOST_CHECK(update.old_chunks[0].m_fee_rate == child_rate);
+    BOOST_CHECK_EQUAL(update.old_chunks[1].m_chunk_hash, ExpectedChunkHash({parent_tx}));
+    BOOST_CHECK(update.old_chunks[1].m_fee_rate == parent_rate);
+    BOOST_CHECK_EQUAL(update.new_chunks[0].m_chunk_hash, ExpectedChunkHash({parent_tx, child_tx}));
+    BOOST_CHECK(update.new_chunks[0].m_fee_rate == combined_rate);
+    BOOST_CHECK_EQUAL(WITH_LOCK(mpool.cs, return mpool.GetCluster(parent_tx.GetHash()).size()), 2U);
+    BOOST_CHECK(mpool.exists(parent_tx.GetHash()));
+    BOOST_CHECK(mpool.exists(child_tx.GetHash()));
 }
 
 BOOST_AUTO_TEST_CASE(MempoolUpdated_ObservationContext)
