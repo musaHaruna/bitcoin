@@ -54,6 +54,7 @@ add_executable(bench_bitcoin
   txorphanage.cpp
   uint256_blob.cpp
   util_time.cpp
+  utxo_scan.cpp
   verify_script.cpp
 )
 
