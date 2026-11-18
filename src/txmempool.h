@@ -330,7 +330,11 @@ public:
      *                                        and updates an entry's LockPoints.
      * */
     void removeForReorg(CChain& chain, std::function<bool(txiter)> filter_final_and_mature) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
-    std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& vtx) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& vtx, std::optional<MemPoolObservationContext> context = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    /** Batch reorg reconstruction into one coherent publication after dependency repair. */
+    void BeginChunkReorg(unsigned int height) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void EndChunkReorg(MemPoolObservationContext context) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** Look up wtxids in the mempool and (partially) sort by mining score.
      *
@@ -467,11 +471,14 @@ public:
     /** Remove transactions from the mempool until its dynamic size is <= sizelimit.
       *  pvNoSpendsRemaining, if set, will be populated with the list of outpoints
       *  which are not in mempool which no longer have any spends in this mempool.
+      *  Validation callers supply fresh context for any resulting chunk observations.
       */
-    void TrimToSize(size_t sizelimit, std::vector<COutPoint>* pvNoSpendsRemaining = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void TrimToSize(size_t sizelimit, std::vector<COutPoint>* pvNoSpendsRemaining = nullptr,
+                    std::optional<MemPoolObservationContext> context = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
-    /** Expire all transaction (and their dependencies) in the mempool older than time. Return the number of removed transactions. */
-    int Expire(std::chrono::seconds time) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    /** Expire transactions (and their dependencies) older than time and return the number removed.
+     *  Validation callers supply fresh context for any resulting chunk observations. */
+    int Expire(std::chrono::seconds time, std::optional<MemPoolObservationContext> context = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /**
      * Calculate the ancestor and cluster count for the given transaction.
@@ -612,7 +619,7 @@ private:
      *  also be in the set, unless this transaction is being removed for being
      *  in a block.
      */
-    void RemoveStaged(setEntries& stage, MemPoolRemovalReason reason) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void RemoveStaged(const setEntries& stage, MemPoolRemovalReason reason) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /* Helper for the public removeRecursive() */
     void removeRecursive(txiter to_remove, MemPoolRemovalReason reason) EXCLUSIVE_LOCKS_REQUIRED(cs);
@@ -707,7 +714,7 @@ public:
         size_t GetTxCount() const { return m_entry_vec.size(); }
         const CTransaction& GetAddedTxn(size_t index) const { return m_entry_vec.at(index)->GetTx(); }
 
-        void Apply() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        void Apply(std::optional<MemPoolObservationContext> context = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     private:
         void ProcessDependencies();
@@ -735,6 +742,28 @@ public:
     friend class CTxMemPool::ChangeSet;
 
 private:
+    struct PublishedChunk {
+        MemPoolChunk description;
+        std::vector<Wtxid> members;
+    };
+    // Retain owned state so every event starts from the last published state,
+    // including changes caused by lazy graph maintenance or local fee deltas.
+    std::map<uint256, PublishedChunk> m_published_chunks GUARDED_BY(cs);
+    std::map<Wtxid, uint256> m_published_chunk_by_wtxid GUARDED_BY(cs);
+    std::map<Wtxid, MemPoolRemovalReason> m_removed_chunk_wtxids GUARDED_BY(cs);
+    /** Evidence collected from the intact pre-block mempool. */
+    std::map<uint256, MemPoolChunkEndReason> m_block_chunk_endings GUARDED_BY(cs);
+    std::set<Wtxid> m_fee_estimation_eligible GUARDED_BY(cs);
+    size_t m_published_members_usage GUARDED_BY(cs){0};
+    uint64_t m_chunk_update_sequence GUARDED_BY(cs){0};
+    std::optional<MemPoolObservationContext> m_chunk_context GUARDED_BY(cs);
+    bool m_chunk_reorg GUARDED_BY(cs){false};
+
+    void PrepareChunkUpdate(std::optional<MemPoolObservationContext> context = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void PublishChunkUpdate(MemPoolRemovalReason reason, MemPoolUpdateCause cause,
+                            const std::vector<CTransactionRef>* block_txs = nullptr,
+                            bool force = false, bool reset = false) EXCLUSIVE_LOCKS_REQUIRED(cs);
+
     // Apply the given changeset to the mempool, by removing transactions in
     // the to_remove set and adding transactions in the to_add set.
     void Apply(CTxMemPool::ChangeSet* changeset) EXCLUSIVE_LOCKS_REQUIRED(cs);

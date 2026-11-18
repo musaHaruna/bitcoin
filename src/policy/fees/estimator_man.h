@@ -7,7 +7,6 @@
 
 #include <policy/fees/block_policy_estimator.h>
 #include <policy/fees/mempool_estimator.h>
-#include <primitives/transaction.h>
 #include <util/expected.h>
 #include <util/fees.h>
 #include <util/fs.h>
@@ -100,8 +99,7 @@ public:
 
 protected:
     /** Overridden from CValidationInterface. */
-    void TransactionAddedToMempool(const NewMempoolTransactionInfo& tx, uint64_t /*unused*/) override;
-    void TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason /*unused*/, uint64_t /*unused*/) override;
+    void MempoolUpdated(const MemPoolChunksUpdate& update) override;
     void MempoolTransactionsRemovedForBlock(const std::shared_ptr<const CBlock>& block, const std::vector<RemovedMempoolTransactionInfo>& txs_removed_for_block, unsigned int block_height) override;
 
 private:

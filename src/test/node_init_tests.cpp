@@ -2,17 +2,19 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <chainparams.h>
 #include <init.h>
 #include <interfaces/init.h>
+#include <kernel/cs_main.h>
 #include <kernel/mempool_entry.h>
 #include <logging.h>
 #include <node/context.h>
 #include <policy/fees/estimator_args.h>
-#include <primitives/block.h>
 #include <rpc/server.h>
 #include <scheduler.h>
 #include <streams.h>
+#include <sync.h>
+#include <txmempool.h>
+#include <util/chaintype.h>
 #include <util/fs.h>
 #include <validationinterface.h>
 
@@ -64,10 +66,14 @@ BOOST_AUTO_TEST_CASE(init_test)
     BOOST_CHECK(AppInitMain(m_node));
     Interrupt(m_node);
 
-    // Model a block update left queued after the scheduler stops during shutdown
+    // Queue a block update after the scheduler stops. Shutdown must deliver it
+    // before saving fee estimates. Use the publisher to preserve event sequencing.
     m_node.scheduler->stop();
     constexpr unsigned int queued_height{123};
-    m_node.validation_signals->MempoolTransactionsRemovedForBlock(std::make_shared<CBlock>(Params().GenesisBlock()), {}, queued_height);
+    {
+        LOCK2(cs_main, m_node.mempool->cs);
+        m_node.mempool->removeForBlock({}, MemPoolObservationContext{queued_height, true, false});
+    }
     BOOST_REQUIRE_GT(m_node.validation_signals->CallbacksPending(), 0);
 
     Shutdown(m_node);

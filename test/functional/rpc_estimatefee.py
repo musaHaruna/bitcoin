@@ -10,7 +10,7 @@ Test the following RPCs:
 """
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_raises_rpc_error
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 class EstimateFeeTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -59,7 +59,15 @@ class EstimateFeeTest(BitcoinTestFramework):
         self.nodes[0].estimatesmartfee(1, 'ECONOMICAL', {"fee_rate_estimator": "mempool_policy"})
         self.nodes[0].estimatesmartfee(1, 'ECONOMICAL', {'verbosity': 1, 'fee_rate_estimator': "auto"})
 
-        self.nodes[0].estimaterawfee(1)
+        raw = self.nodes[0].estimaterawfee(1)
+        for horizon in raw.values():
+            population = horizon["population"]
+            assert_equal(population["total"], population["success"] + population["failure"] + population["unknown"])
+            assert_equal(population["unknown"], sum(population["unknown_reasons"].values()))
+            assert_equal(population["lower"], 0)
+            assert_equal(population["upper"], 1)
+            assert_equal(horizon["target"], horizon["scale"])
+            assert_equal(horizon["active_observations"], 0)
         self.nodes[0].estimaterawfee(1, None)
         self.nodes[0].estimaterawfee(1, 1)
 

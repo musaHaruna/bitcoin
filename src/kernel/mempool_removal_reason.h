@@ -5,6 +5,7 @@
 #ifndef BITCOIN_KERNEL_MEMPOOL_REMOVAL_REASON_H
 #define BITCOIN_KERNEL_MEMPOOL_REMOVAL_REASON_H
 
+#include <cstdint>
 #include <string>
 
 /** Reason why a transaction was removed from the mempool,
@@ -17,6 +18,25 @@ enum class MemPoolRemovalReason {
     BLOCK,       //!< Removed for block
     CONFLICT,    //!< Removed for conflict with in-block transaction
     REPLACED,    //!< Removed for replacement
+};
+
+/** Why a continuously observed chunk stopped being the same mining offer.
+ * These values also index persisted estimator diagnostics; changing them requires
+ * a fee-estimates format version change. Confirmation is not an unknown outcome.
+ */
+enum class MemPoolChunkEndReason : uint8_t {
+    CONFIRMED,
+    REPLACED,
+    PACKAGE_CHANGED,
+    EXPIRY,
+    EVICTION,
+    PARTIAL_CONFIRMATION,
+    UNSEEN_SPONSOR,
+    BLOCK_CONFLICT,
+    LOCAL_POLICY,
+    REORDERING,
+    OBSERVATION_LOST,
+    COUNT,
 };
 
 std::string RemovalReasonToString(const MemPoolRemovalReason& r) noexcept;

@@ -220,8 +220,8 @@ public:
     /** Improve the linearization of this Cluster. Returns how much work was performed and whether
      *  the Cluster's QualityLevel improved as a result. */
     virtual std::pair<uint64_t, bool> Relinearize(TxGraphImpl& graph, int level, uint64_t max_cost) noexcept = 0;
-    /** For every chunk in the cluster, append its FeeFrac to ret. */
-    virtual void AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept = 0;
+    /** For every chunk in the cluster, append its fee/weight and references in linearization order. */
+    virtual void AppendChunks(const TxGraphImpl& graph, std::vector<TxGraph::Chunk>& ret) const noexcept = 0;
     /** Add a TrimTxData entry (filling m_chunk_feerate, m_index, m_tx_size) for every
      *  transaction in the Cluster to ret. Implicit dependencies between consecutive transactions
      *  in the linearization are added to deps. Return the Cluster's total transaction size. */
@@ -299,7 +299,7 @@ public:
     void Merge(TxGraphImpl& graph, int level, Cluster& cluster) noexcept final;
     void ApplyDependencies(TxGraphImpl& graph, int level, std::span<std::pair<GraphIndex, GraphIndex>> to_apply) noexcept final;
     std::pair<uint64_t, bool> Relinearize(TxGraphImpl& graph, int level, uint64_t max_cost) noexcept final;
-    void AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept final;
+    void AppendChunks(const TxGraphImpl& graph, std::vector<TxGraph::Chunk>& ret) const noexcept final;
     uint64_t AppendTrimData(std::vector<TrimTxData>& ret, std::vector<std::pair<GraphIndex, GraphIndex>>& deps) const noexcept final;
     void GetAncestorRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept final;
     void GetDescendantRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept final;
@@ -356,7 +356,7 @@ public:
     void Merge(TxGraphImpl& graph, int level, Cluster& cluster) noexcept final;
     void ApplyDependencies(TxGraphImpl& graph, int level, std::span<std::pair<GraphIndex, GraphIndex>> to_apply) noexcept final;
     std::pair<uint64_t, bool> Relinearize(TxGraphImpl& graph, int level, uint64_t max_cost) noexcept final;
-    void AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept final;
+    void AppendChunks(const TxGraphImpl& graph, std::vector<TxGraph::Chunk>& ret) const noexcept final;
     uint64_t AppendTrimData(std::vector<TrimTxData>& ret, std::vector<std::pair<GraphIndex, GraphIndex>>& deps) const noexcept final;
     void GetAncestorRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept final;
     void GetDescendantRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept final;
@@ -406,6 +406,10 @@ private:
     const uint64_t m_acceptable_cost;
     /** Fallback ordering for transactions. */
     const std::function<std::strong_ordering(const TxGraph::Ref&, const TxGraph::Ref&)> m_fallback_order;
+    /** Optional change stream for the owner of the main graph. Ref addresses remain stable
+     *  across cluster rewrites and entry compaction; UpdateRef/UnlinkRef handle their lifetime. */
+    bool m_track_main_chunks{false};
+    std::unordered_set<Ref*> m_changed_main_refs;
 
     /** Information about one group of Clusters to be merged. */
     struct GroupEntry
@@ -724,6 +728,9 @@ public:
     {
         auto& entry = m_entries[idx];
         Assume(entry.m_ref != nullptr);
+        if (m_track_main_chunks && m_changed_main_refs.erase(entry.m_ref)) {
+            m_changed_main_refs.insert(&new_location);
+        }
         entry.m_ref = &new_location;
     }
 
@@ -732,6 +739,7 @@ public:
     {
         auto& entry = m_entries[idx];
         Assume(entry.m_ref != nullptr);
+        if (m_track_main_chunks) m_changed_main_refs.erase(entry.m_ref);
         Assume(m_main_chunkindex_observers == 0 || !entry.m_locator[0].IsPresent());
         // Remove all chunk index entries for the affected cluster, to avoid any chunk indexes
         // referencing unlinked/destroyed Refs.
@@ -822,7 +830,9 @@ public:
     bool IsOversized(Level level) noexcept final;
     std::strong_ordering CompareMainOrder(const Ref& a, const Ref& b) noexcept final;
     GraphIndex CountDistinctClusters(std::span<const Ref* const> refs, Level level) noexcept final;
-    std::pair<std::vector<FeeFrac>, std::vector<FeeFrac>> GetMainStagingDiagrams() noexcept final;
+    std::pair<std::vector<TxGraph::Chunk>, std::vector<TxGraph::Chunk>> GetMainStagingDiagrams() noexcept final;
+    void EnableMainChunkTracking() noexcept final;
+    std::vector<Chunk> TakeChangedMainChunks() noexcept final;
     std::vector<Ref*> Trim() noexcept final;
 
     std::unique_ptr<BlockBuilder> GetBlockBuilder() noexcept final;
@@ -1077,7 +1087,12 @@ void GenericClusterImpl::Updated(TxGraphImpl& graph, int level, bool rename) noe
         auto& entry = graph.m_entries[m_mapping[idx]];
         // Discard any potential ChunkData prior to modifying the Cluster (as that could
         // invalidate its ordering).
-        if (level == 0 && !rename) graph.ClearChunkData(entry);
+        if (level == 0 && !rename) {
+            graph.ClearChunkData(entry);
+            if (graph.m_track_main_chunks && entry.m_ref) {
+                graph.m_changed_main_refs.insert(entry.m_ref);
+            }
+        }
         entry.m_locator[level].SetPresent(this, idx);
     }
     // If this is for the main graph (level = 0), and the Cluster's quality is ACCEPTABLE or
@@ -1154,7 +1169,12 @@ void SingletonClusterImpl::Updated(TxGraphImpl& graph, int level, bool rename) n
     auto& entry = graph.m_entries[m_graph_index];
     // Discard any potential ChunkData prior to modifying the Cluster (as that could
     // invalidate its ordering).
-    if (level == 0 && !rename) graph.ClearChunkData(entry);
+    if (level == 0 && !rename) {
+        graph.ClearChunkData(entry);
+        if (graph.m_track_main_chunks && entry.m_ref) {
+            graph.m_changed_main_refs.insert(entry.m_ref);
+        }
+    }
     entry.m_locator[level].SetPresent(this, 0);
     // If this is for the main graph (level = 0), compute its chunking and store its information in
     // the Entry's m_main_lin_index and m_main_chunk_feerate.
@@ -1380,17 +1400,29 @@ void SingletonClusterImpl::Compact() noexcept
     // Nothing to compact; SingletonClusterImpl is constant size.
 }
 
-void GenericClusterImpl::AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept
+void GenericClusterImpl::AppendChunks(const TxGraphImpl& graph, std::vector<TxGraph::Chunk>& ret) const noexcept
 {
-    auto chunk_feerates = ChunkLinearization(m_depgraph, m_linearization);
-    ret.reserve(ret.size() + chunk_feerates.size());
-    ret.insert(ret.end(), chunk_feerates.begin(), chunk_feerates.end());
+    const auto linchunking = ChunkLinearizationInfo(m_depgraph, m_linearization);
+    ret.reserve(ret.size() + linchunking.size());
+    LinearizationIndex pos{0};
+    for (const auto& [chunk, chunk_feerate] : linchunking) {
+        const auto chunk_tx_count = chunk.Count();
+        std::vector<TxGraph::Ref*> refs;
+        refs.reserve(chunk_tx_count);
+        for (unsigned j = 0; j < chunk_tx_count; ++j) {
+            const auto cluster_idx = m_linearization[pos];
+            refs.emplace_back(graph.m_entries[m_mapping[cluster_idx]].m_ref);
+            ++pos;
+        }
+        ret.emplace_back(chunk_feerate, std::move(refs));
+    }
 }
 
-void SingletonClusterImpl::AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept
+void SingletonClusterImpl::AppendChunks(const TxGraphImpl& graph, std::vector<TxGraph::Chunk>& ret) const noexcept
 {
     if (GetTxCount()) {
-        ret.push_back(m_feerate);
+        const auto& entry = graph.m_entries[m_graph_index];
+        ret.emplace_back(m_feerate, std::vector<TxGraph::Ref*>{entry.m_ref});
     }
 }
 
@@ -2806,7 +2838,7 @@ TxGraph::GraphIndex TxGraphImpl::CountDistinctClusters(std::span<const Ref* cons
     return ret;
 }
 
-std::pair<std::vector<FeeFrac>, std::vector<FeeFrac>> TxGraphImpl::GetMainStagingDiagrams() noexcept
+std::pair<std::vector<TxGraph::Chunk>, std::vector<TxGraph::Chunk>> TxGraphImpl::GetMainStagingDiagrams() noexcept
 {
     Assume(m_staging_clusterset.has_value());
     MakeAllAcceptable(0);
@@ -2814,22 +2846,55 @@ std::pair<std::vector<FeeFrac>, std::vector<FeeFrac>> TxGraphImpl::GetMainStagin
     MakeAllAcceptable(1);
     Assume(m_staging_clusterset->m_deps_to_add.empty()); // can only fail if staging is oversized
     // For all Clusters in main which conflict with Clusters in staging (i.e., all that are removed
-    // by, or replaced in, staging), gather their chunk feerates.
+    // by, or replaced in, staging), gather their chunks.
     auto main_clusters = GetConflicts();
-    std::vector<FeeFrac> main_feerates, staging_feerates;
+    std::vector<Chunk> main_chunks, staging_chunks;
     for (Cluster* cluster : main_clusters) {
-        cluster->AppendChunkFeerates(main_feerates);
+        cluster->AppendChunks(*this, main_chunks);
     }
     // Do the same for the Clusters in staging themselves.
     for (int quality = 0; quality < int(QualityLevel::NONE); ++quality) {
         for (const auto& cluster : m_staging_clusterset->m_clusters[quality]) {
-            cluster->AppendChunkFeerates(staging_feerates);
+            cluster->AppendChunks(*this, staging_chunks);
         }
     }
     // Sort both by decreasing feerate to obtain diagrams, and return them.
-    std::ranges::sort(main_feerates, std::greater<ByRatioNegSize<FeeFrac>>{});
-    std::ranges::sort(staging_feerates, std::greater<ByRatioNegSize<FeeFrac>>{});
-    return std::make_pair(std::move(main_feerates), std::move(staging_feerates));
+    std::ranges::sort(main_chunks, std::greater<ByRatioNegSize<FeeFrac>>{}, &Chunk::feerate);
+    std::ranges::sort(staging_chunks, std::greater<ByRatioNegSize<FeeFrac>>{}, &Chunk::feerate);
+    return std::make_pair(std::move(main_chunks), std::move(staging_chunks));
+}
+
+void TxGraphImpl::EnableMainChunkTracking() noexcept
+{
+    if (m_track_main_chunks) return;
+    m_track_main_chunks = true;
+    // This one-time walk also supports enabling tracking on an existing graph.
+    for (const auto& entry : m_entries) {
+        if (entry.m_ref && entry.m_locator[0].IsPresent()) {
+            m_changed_main_refs.insert(entry.m_ref);
+        }
+    }
+}
+
+std::vector<TxGraph::Chunk> TxGraphImpl::TakeChangedMainChunks() noexcept
+{
+    Assume(m_track_main_chunks);
+    // Apply pending removals, splits, dependencies, and required linearization work before
+    // reading the dirty set. Those operations can add further surviving main references.
+    MakeAllAcceptable(/*level=*/0);
+    Assume(m_main_clusterset.m_deps_to_add.empty());
+    Assume(m_main_clusterset.m_oversized == false);
+
+    std::unordered_set<Cluster*> clusters;
+    for (const auto* ref : m_changed_main_refs) {
+        const auto& locator = m_entries[GetRefIndex(*ref)].m_locator[0];
+        if (locator.IsPresent()) clusters.insert(locator.cluster);
+    }
+    std::vector<Chunk> chunks;
+    for (const auto* cluster : clusters) cluster->AppendChunks(*this, chunks);
+    std::sort(chunks.begin(), chunks.end(), [](const auto& a, const auto& b) { return a > b; });
+    m_changed_main_refs.clear();
+    return chunks;
 }
 
 void GenericClusterImpl::SanityCheck(const TxGraphImpl& graph, int level) const
@@ -2903,6 +2968,24 @@ void GenericClusterImpl::SanityCheck(const TxGraphImpl& graph, int level) const
     }
     // Verify that each element of m_depgraph occurred in m_linearization.
     assert(m_done == m_depgraph.Positions());
+
+    // Verify both the contents and boundaries of the chunks returned by AppendChunks.
+    std::vector<TxGraph::Chunk> chunks;
+    AppendChunks(graph, chunks);
+    assert(chunks.size() == linchunking.size());
+    LinearizationIndex pos{0};
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        const auto& expected = linchunking[i];
+        assert(chunks[i].refs.size() == expected.transactions.Count());
+        for (auto* ref : chunks[i].refs) {
+            assert(pos < m_linearization.size());
+            const auto cluster_idx = m_linearization[pos++];
+            assert(expected.transactions[cluster_idx]);
+            assert(ref == graph.m_entries[m_mapping[cluster_idx]].m_ref);
+        }
+        assert(chunks[i].feerate == expected.feerate);
+    }
+    assert(pos == m_linearization.size());
 }
 
 void SingletonClusterImpl::SanityCheck(const TxGraphImpl& graph, int level) const
@@ -2925,11 +3008,25 @@ void SingletonClusterImpl::SanityCheck(const TxGraphImpl& graph, int level) cons
                 assert(chunk_data.m_chunk_count == LinearizationIndex(-1));
             }
         }
+
+        // Verify the singleton chunk's fee/weight and sole reference.
+        std::vector<TxGraph::Chunk> chunks;
+        AppendChunks(graph, chunks);
+        assert(chunks.size() == 1);
+        assert(chunks[0].refs.size() == 1);
+        assert(chunks[0].feerate == m_feerate);
+        assert(chunks[0].refs[0] == entry.m_ref);
     }
 }
 
 void TxGraphImpl::SanityCheck() const
 {
+    assert(m_track_main_chunks || m_changed_main_refs.empty());
+    for (const auto* ref : m_changed_main_refs) {
+        assert(GetRefGraph(*ref) == this);
+        assert(GetRefIndex(*ref) < m_entries.size());
+        assert(m_entries[GetRefIndex(*ref)].m_ref == ref);
+    }
     /** Which GraphIndexes ought to occur in m_unlinked, based on m_entries. */
     std::set<GraphIndex> expected_unlinked;
     /** Which Clusters ought to occur in ClusterSet::m_clusters, based on m_entries. */
@@ -3556,6 +3653,14 @@ size_t TxGraphImpl::GetMainMemoryUsage() noexcept
                    sizeof(Entry) * m_main_clusterset.m_txcount +
                    /* From the chunk index. */
                    memusage::DynamicUsage(m_main_chunkindex);
+    // An unused unordered_set may report a bucket backed by inline storage.
+    // Disabled tracking must not contribute to the graph's dynamic usage.
+    if (m_track_main_chunks) {
+        // Each change-stream hash node holds a Ref pointer and a next pointer.
+        // DynamicUsage(unordered_set) does not support scalar element types.
+        usage += memusage::MallocUsage(2 * sizeof(void*)) * m_changed_main_refs.size() +
+                 memusage::MallocUsage(sizeof(void*) * m_changed_main_refs.bucket_count());
+    }
     return usage;
 }
 
