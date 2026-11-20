@@ -251,6 +251,31 @@ BOOST_AUTO_TEST_CASE(SmartEstimateAfterFeesFall)
     BOOST_CHECK_EQUAL(three.returnedTarget, 4);
 }
 
+BOOST_AUTO_TEST_CASE(UnknownOnlyHistoryDoesNotWarmUpSmartEstimates)
+{
+    ChunkEstimatorHarness test;
+    const auto unknown = MakeChunk(0);
+    test.Update(100, {}, {unknown});
+    test.Block(101, {unknown}); // Ends without a usable confirmation or a known miss.
+    for (unsigned int height{102}; height <= 120; ++height) test.Block(height);
+
+    std::vector<MemPoolChunk> confirmed;
+    for (uint64_t id{1}; id <= 20; ++id) confirmed.push_back(MakeChunk(id, 100, 400));
+    test.Update(120, {}, confirmed);
+    test.Confirm(121, confirmed);
+    BOOST_CHECK_EQUAL(test.estimator.estimateRawFee(2, .95, FeeEstimateHorizon::SHORT_HALFLIFE).GetFeePerK(), 1000);
+    BOOST_CHECK_EQUAL(test.estimator.estimateSmartFee(2, nullptr, false).GetFeePerK(), 0);
+
+    // Smart estimates require four blocks of history after the first known
+    // outcome. The preceding unknown-only history must not satisfy that gate.
+    for (unsigned int height{122}; height <= 124; ++height) {
+        test.Block(height);
+        BOOST_CHECK_EQUAL(test.estimator.estimateSmartFee(2, nullptr, false).GetFeePerK(), 0);
+    }
+    test.Block(125);
+    BOOST_CHECK_EQUAL(test.estimator.estimateSmartFee(2, nullptr, false).GetFeePerK(), 1000);
+}
+
 BOOST_AUTO_TEST_CASE(SmartEstimateOrderingAcrossHorizons)
 {
     ChunkEstimatorHarness test;
@@ -662,7 +687,7 @@ BOOST_AUTO_TEST_CASE(PersistenceRoundTripClearsRuntimeObservations)
     file.seek(0, SEEK_SET);
     int version;
     file >> version;
-    BOOST_CHECK_EQUAL(version, 309903);
+    BOOST_CHECK_EQUAL(version, 309904);
     file.seek(0, SEEK_SET);
 
     BOOST_REQUIRE(test.estimator.Read(file));
@@ -683,7 +708,7 @@ BOOST_AUTO_TEST_CASE(PreviousModelFilesAreRejectedWithoutChangingRuntimeState)
     const auto chunk = MakeChunk(1);
     test.Update(100, {}, {chunk});
     test.Block(101);
-    for (const int version : {309900, 309902}) {
+    for (const int version : {309900, 309902, 309903}) {
         AutoFile file{std::tmpfile()};
         BOOST_REQUIRE(!file.IsNull());
         BOOST_REQUIRE(test.estimator.Write(file));
@@ -744,11 +769,14 @@ BOOST_AUTO_TEST_CASE(EarlyEndingsRemainUnknownForLaterTargets)
     BOOST_CHECK_EQUAL(c.failure, 0);
     BOOST_CHECK_EQUAL(c.unknown, 900);
     EstimationResult stats;
-    BOOST_CHECK_EQUAL(test.estimator.estimateRawFee(6, .95, FeeEstimateHorizon::SHORT_HALFLIFE, &stats).GetFeePerK(), 0);
+    BOOST_CHECK_EQUAL(test.estimator.estimateRawFee(6, .95, FeeEstimateHorizon::SHORT_HALFLIFE, &stats).GetFeePerK(), 10000);
+    BOOST_CHECK_EQUAL(stats.pass.success, 100);
+    BOOST_CHECK_EQUAL(stats.pass.Unknown(), 900);
     BOOST_CHECK_CLOSE_FRACTION(stats.all.Lower(), .1, 1e-12);
     BOOST_CHECK_EQUAL(stats.all.Upper(), 1);
     BOOST_CHECK_EQUAL(stats.all.unknown[static_cast<size_t>(MemPoolChunkEndReason::REPLACED)], 900);
     BOOST_CHECK_CLOSE_FRACTION(test.Counts(1).failure, 1000 * std::pow(.962, 5), 1e-12);
+    BOOST_CHECK_EQUAL(test.estimator.estimateRawFee(1, .95, FeeEstimateHorizon::SHORT_HALFLIFE).GetFeePerK(), 0);
 }
 
 BOOST_AUTO_TEST_CASE(MissedDeadlineWeightIgnoresLaterEnding)

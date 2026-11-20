@@ -107,13 +107,15 @@ bool ChunkConfirmStats::EndChunk(unsigned int birth, unsigned int height, unsign
         // Same-height endings had no block opportunity. Confirmed observations
         // were recorded above and must not enter later deadlines a second time.
         --cohort.count;
-        cohort.fee_sum = std::max(0.0, cohort.fee_sum - rate);
-        if (!cohort.count) {
-            start->second.erase(bucket);
-            if (start->second.empty()) m_cohorts.erase(start);
-        }
     } else {
         ++cohort.unknown.at(static_cast<size_t>(reason));
+    }
+    // Endings do not change earlier target results. Only still-active
+    // observations can contribute fees to future known misses.
+    cohort.fee_sum = cohort.Active() ? std::max(0.0, cohort.fee_sum - rate) : 0;
+    if (!cohort.count) {
+        start->second.erase(bucket);
+        if (start->second.empty()) m_cohorts.erase(start);
     }
     return recorded;
 }
@@ -126,7 +128,7 @@ void ChunkConfirmStats::UpdateMovingAverages(unsigned int blocks)
         cell.outcomes.failure *= factor;
         for (auto& count : cell.outcomes.unknown) count *= factor;
         cell.fee_sum *= factor;
-        if (cell.outcomes.Total() == 0) cell.fee_sum = 0;
+        if (cell.outcomes.Known() == 0) cell.fee_sum = 0;
     }
 }
 
@@ -147,7 +149,7 @@ bool ChunkConfirmStats::Mature(unsigned int previous, unsigned int height)
                 cell.outcomes.failure += weight * cohort.Active();
                 for (size_t i{0}; i < NUM_CHUNK_END_REASONS; ++i) cell.outcomes.unknown[i] += weight * cohort.unknown[i];
                 cell.fee_sum += weight * cohort.fee_sum;
-                recorded |= cohort.count != 0;
+                recorded |= cohort.Active() != 0;
             }
         }
     }
@@ -189,12 +191,12 @@ double ChunkConfirmStats::EstimateMedianVal(int target, double sufficient, doubl
         range.start = b ? buckets[b - 1] : 0;
         range.end = buckets[high];
         Add(range, row[b].outcomes);
-        support += row[b].outcomes.Total();
-        if (support < sufficient / (1 - decay)) continue;
+        support += row[b].outcomes.Known();
+        if (support == 0 || support < sufficient / (1 - decay)) continue;
         support = 0;
-        // Unknown outcomes remain in the denominator: this is a descriptive
-        // lower bound, not a confidence interval or a guarantee of calibration.
-        if (range.Lower() < threshold) {
+        // Unknown outcomes remain available in diagnostics but do not affect
+        // the success ratio or satisfy the minimum sample requirement.
+        if (range.SuccessRatio() < threshold) {
             if (passing) fail = range;
             passing = false;
         } else {
@@ -210,9 +212,9 @@ double ChunkConfirmStats::EstimateMedianVal(int target, double sufficient, doubl
     if (passing && !new_range) fail = range;
     double median{-1};
     if (found) {
-        double remaining = pass.Total() / 2;
+        double remaining = pass.Known() / 2;
         for (size_t b = best_low; b <= best_high; ++b) {
-            const double count = row[b].outcomes.Total();
+            const double count = row[b].outcomes.Known();
             if (count < remaining) remaining -= count;
             else if (count > 0) { median = row[b].fee_sum / count; break; }
         }
@@ -248,9 +250,10 @@ void ChunkConfirmStats::Write(AutoFile& file, unsigned int height) const
         file << birth << uint32_t(by_bucket.size());
         for (const auto& [bucket, original] : by_bucket) {
             auto cohort = original;
-            // Active observations cannot be resumed across downtime. Keep
-            // unresolved deadlines as unknown instead of silently dropping them.
+            // Active observations cannot be resumed across downtime. Retain
+            // unknown diagnostics, but exclude their fees from future estimates.
             cohort.unknown[static_cast<size_t>(MemPoolChunkEndReason::OBSERVATION_LOST)] += cohort.Active();
+            cohort.fee_sum = 0;
             file << bucket << cohort.count;
             for (const auto count : cohort.unknown) file << count;
             file << Using<EncodedDoubleFormatter>(cohort.fee_sum);
@@ -273,7 +276,7 @@ void ChunkConfirmStats::Read(AutoFile& file, size_t num_buckets, unsigned int be
         ReadDouble(file, cell.fee_sum);
         for (auto& value : cell.outcomes.unknown) ReadDouble(file, value);
         if (cell.outcomes.unknown[0] != 0 || !std::isfinite(cell.outcomes.Total()) ||
-            (cell.outcomes.Total() == 0 && cell.fee_sum != 0)) throw std::runtime_error("Invalid cohort outcomes");
+            (cell.outcomes.Known() == 0 && cell.fee_sum != 0)) throw std::runtime_error("Invalid cohort outcomes");
     }
     uint32_t cohorts;
     file >> cohorts;
@@ -296,7 +299,7 @@ void ChunkConfirmStats::Read(AutoFile& file, size_t num_buckets, unsigned int be
                 if (value > remaining) throw std::runtime_error("Invalid pending outcome count");
                 remaining -= value;
             }
-            if (remaining != 0) throw std::runtime_error("Persisted active observation");
+            if (remaining != 0 || cohort.fee_sum != 0) throw std::runtime_error("Persisted active observation");
             by_bucket.emplace(bucket, cohort);
         }
     }

@@ -92,15 +92,21 @@ def check_raw_estimates(node, fees_seen):
     for i in range(1, 26):
         for horizon, e in node.estimaterawfee(i).items():
             population = e["population"]
-            assert abs(population["total"] - population["success"] - population["failure"] - population["unknown"]) < Decimal("1e-8")
+            for bucket in (e[key] for key in ("population", "pass", "fail") if key in e):
+                assert abs(bucket["total"] - bucket["success"] - bucket["failure"] - bucket["unknown"]) < Decimal("1e-8")
+                assert abs(bucket["known_outcomes"] - bucket["success"] - bucket["failure"]) < Decimal("1e-8")
+                expected_ratio = bucket["success"] / bucket["known_outcomes"] if bucket["known_outcomes"] else 0
+                assert abs(bucket["known_success_ratio"] - expected_ratio) < Decimal("1e-8")
+                assert bucket["lower"] <= bucket["known_success_ratio"] <= bucket["upper"]
             if "feerate" not in e:
-                # A range can have too little support or fail the lower success
-                # ratio, which retains unknown outcomes in the denominator.
+                # A range can have too few known outcomes or fail the success
+                # ratio among those outcomes. Unknown outcomes do not contribute.
                 assert "errors" in e
                 sufficient = Decimal("0.5") if horizon == "short" else Decimal("0.1")
-                assert population["total"] < sufficient / (1 - e["decay"]) or e["fail"]["lower"] < Decimal("0.95")
+                assert population["known_outcomes"] < sufficient / (1 - e["decay"]) or e["fail"]["known_success_ratio"] < Decimal("0.95")
                 continue
             available += 1
+            assert_greater_than_or_equal(e["pass"]["known_success_ratio"], Decimal("0.95"))
             feerate = float(e["feerate"])
             assert_greater_than(feerate, 0)
 

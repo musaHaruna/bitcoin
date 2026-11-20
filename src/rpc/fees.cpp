@@ -160,10 +160,12 @@ static std::vector<RPCResult> FeeRateBucketDoc(bool elide = false)
         {RPCResult::Type::NUM, "endrange", "end of feerate range"},
         {RPCResult::Type::NUM, "success", "decayed chunk observations confirmed by their target deadline"},
         {RPCResult::Type::NUM, "failure", "decayed chunk observations known unconfirmed through their target deadline"},
-        {RPCResult::Type::NUM, "unknown", "decayed chunk observations whose target outcome is unknown"},
+        {RPCResult::Type::NUM, "unknown", "decayed chunk observations whose target outcome is unknown; excluded from fee estimation"},
         {RPCResult::Type::NUM, "total", "success + failure + unknown; confirmations enter immediately, other outcomes at their target deadline"},
-        {RPCResult::Type::NUM, "lower", "success / total (0 if empty); descriptive bound, not a confidence interval"},
-        {RPCResult::Type::NUM, "upper", "(success + unknown) / total (1 if empty); descriptive bound, not a confidence interval"},
+        {RPCResult::Type::NUM, "known_outcomes", "success + failure; the decayed observations used for estimation support"},
+        {RPCResult::Type::NUM, "known_success_ratio", "success / known_outcomes (0 if empty); the ratio compared with the threshold"},
+        {RPCResult::Type::NUM, "lower", "success / total (0 if empty); descriptive bound, not a confidence interval; not used for the threshold"},
+        {RPCResult::Type::NUM, "upper", "(success + unknown) / total (1 if empty); descriptive bound, not a confidence interval; not used for the threshold"},
         {RPCResult::Type::OBJ_DYN, "unknown_reasons", "unknown weights by ending reason", {
             {RPCResult::Type::NUM, "reason", "decayed unknown weight"},
         }},
@@ -180,6 +182,8 @@ static UniValue FeeRateBucketJSON(const EstimatorBucket& bucket)
     result.pushKV("failure", bucket.failure);
     result.pushKV("unknown", bucket.Unknown());
     result.pushKV("total", bucket.Total());
+    result.pushKV("known_outcomes", bucket.Known());
+    result.pushKV("known_success_ratio", bucket.SuccessRatio());
     result.pushKV("lower", bucket.Lower());
     result.pushKV("upper", bucket.Upper());
     UniValue reasons{UniValue::VOBJ};
@@ -224,9 +228,9 @@ static RPCMethod estimaterawfee()
         "defined in BIP 141 (witness data is discounted).\n",
         {
             {"conf_target", RPCArg::Type::NUM, RPCArg::Optional::NO, "Confirmation target in blocks (1 - 1008)"},
-            {"threshold", RPCArg::Type::NUM, RPCArg::Default{0.95}, "The lower bound on the proportion of counted chunk observations that must have been\n"
-            "confirmed within conf_target in order to consider those feerates as high enough and proceed to check\n"
-            "lower buckets."},
+            {"threshold", RPCArg::Type::NUM, RPCArg::Default{0.95}, "The minimum success / (success + failure) ratio required to consider those feerates\n"
+            "high enough and proceed to check lower buckets. Success means confirmation within conf_target.\n"
+            "Unknown outcomes are excluded from this ratio, the minimum sample support, and the estimated feerate."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "Results are returned for any horizon which tracks blocks up to the confirmation target",

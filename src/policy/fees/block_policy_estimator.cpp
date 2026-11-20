@@ -38,7 +38,8 @@
 #include <utility>
 
 // Immediate confirmations are stored in target rows, not pending cohorts.
-constexpr int CURRENT_FEES_FILE_VERSION{309903};
+// Fee sums exclude unknown outcomes, unlike the preceding format.
+constexpr int CURRENT_FEES_FILE_VERSION{309904};
 
 static constexpr double INF_FEERATE = 1e99;
 
@@ -567,8 +568,9 @@ CFeeRate CBlockPolicyEstimator::estimateSmartFee(int confTarget, FeeCalculation 
     feeCalc->est = result;
     if (best.median <= 0) return CFeeRate(0); // error condition
 
-    LogDebug(BCLog::ESTIMATEFEE, "estimateSmartFee feerate=%g requested=%d returned=%d reason=%s lower=%g upper=%g total=%g unknown=%g\n",
+    LogDebug(BCLog::ESTIMATEFEE, "estimateSmartFee feerate=%g requested=%d returned=%d reason=%s known_ratio=%g known=%g lower=%g upper=%g total=%g unknown=%g\n",
              best.median, feeCalc->desiredTarget, feeCalc->returnedTarget, StringForBlockPolicyEstimateReason(feeCalc->reason),
+             feeCalc->est.pass.SuccessRatio(), feeCalc->est.pass.Known(),
              feeCalc->est.pass.Lower(), feeCalc->est.pass.Upper(), feeCalc->est.pass.Total(), feeCalc->est.pass.Unknown());
 
     return CFeeRate(llround(best.median));

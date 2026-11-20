@@ -92,6 +92,8 @@ struct FeeCalculation
  * failures and unknowns decay from their deadline. Aggregated cohorts retain
  * unresolved targets for at most 1008 blocks. Gaps close active
  * observations as unknown; reorgs cold-reset historical and pending evidence.
+ * Estimates use successes and known failures. Unknowns are diagnostic only and
+ * do not contribute to the success ratio, sample support, or average feerates.
  *
  * processMempoolUpdate is the sole clock input, including empty block updates.
  */

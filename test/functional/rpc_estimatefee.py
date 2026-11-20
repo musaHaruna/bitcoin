@@ -63,6 +63,8 @@ class EstimateFeeTest(BitcoinTestFramework):
         for horizon in raw.values():
             population = horizon["population"]
             assert_equal(population["total"], population["success"] + population["failure"] + population["unknown"])
+            assert_equal(population["known_outcomes"], population["success"] + population["failure"])
+            assert_equal(population["known_success_ratio"], 0)
             assert_equal(population["unknown"], sum(population["unknown_reasons"].values()))
             assert_equal(population["lower"], 0)
             assert_equal(population["upper"], 1)

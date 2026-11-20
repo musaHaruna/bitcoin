@@ -22,6 +22,8 @@ inline constexpr size_t NUM_CHUNK_END_REASONS{static_cast<size_t>(MemPoolChunkEn
  * Remaining observations enter each target row at birth+target, after block
  * evidence is applied. Successes decay from confirmation; failures and unknowns
  * decay from their target deadline. There is no separate, undecayed pending term.
+ * Estimates use only successes and known failures. Unknown outcomes are retained
+ * for diagnostics, without contributing to sample support or fee averages.
  */
 class ChunkConfirmStats
 {
@@ -34,7 +36,10 @@ public:
         double failure{0};
         std::array<double, NUM_CHUNK_END_REASONS> unknown{};
         double Unknown() const;
-        double Total() const { return success + failure + Unknown(); }
+        double Known() const { return success + failure; }
+        double SuccessRatio() const { return Known() ? success / Known() : 0; }
+        double Total() const { return Known() + Unknown(); }
+        /** Descriptive bounds including unknowns; not used to select estimates. */
         double Lower() const { return Total() ? success / Total() : 0; }
         double Upper() const { return Total() ? (success + Unknown()) / Total() : 1; }
     };
@@ -56,13 +61,13 @@ private:
     struct Cohort {
         uint64_t count{0};
         std::array<uint64_t, NUM_CHUNK_END_REASONS> unknown{};
-        double fee_sum{0};
+        double fee_sum{0}; //!< Sum of rates for active observations only.
         uint64_t Unknown() const;
         uint64_t Active() const;
     };
     struct Cell {
         Bucket outcomes;
-        double fee_sum{0};
+        double fee_sum{0}; //!< Sum of rates for successes and known failures only.
     };
     const std::vector<double>& buckets;
     const std::map<double, unsigned int>& bucketMap;
@@ -88,7 +93,7 @@ public:
     bool EndChunk(unsigned int birth, unsigned int height, unsigned int bucket,
                   double rate, MemPoolChunkEndReason reason);
     void UpdateMovingAverages(unsigned int blocks);
-    /** Record newly reached deadlines after applying block confirmation and ending evidence. */
+    /** Record newly reached deadlines after block evidence; return whether any known failures were added. */
     bool Mature(unsigned int previous, unsigned int height);
     void CheckPending(const std::map<unsigned int, std::map<unsigned int, uint64_t>>& expected, unsigned int height) const;
     double EstimateMedianVal(int target, double sufficient, double threshold, Result* result) const;
