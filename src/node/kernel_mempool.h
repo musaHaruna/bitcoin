@@ -20,6 +20,7 @@ public:
     std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& txs) override
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
     size_t DynamicMemoryUsage() const override;
+    void AddTransactionsUpdated(unsigned int n) override;
 };
 } // namespace node
 

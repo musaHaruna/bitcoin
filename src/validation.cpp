@@ -2990,7 +2990,7 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
 
     // New best block
     if (m_mempool) {
-        m_mempool->AddTransactionsUpdated(1);
+        m_kernel_mempool->AddTransactionsUpdated(1);
     }
 
     std::vector<bilingual_str> warning_messages;

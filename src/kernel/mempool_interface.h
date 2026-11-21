@@ -34,6 +34,8 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
     /** Return current dynamic memory usage; synchronize internally if needed. */
     virtual size_t DynamicMemoryUsage() const = 0;
+    /** Advance the update counter; synchronize internally if needed. */
+    virtual void AddTransactionsUpdated(unsigned int n) = 0;
 };
 } // namespace kernel
 
