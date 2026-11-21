@@ -31,6 +31,7 @@
 #include <node/chainstate.h>
 #include <node/context.h>
 #include <node/indexes.h>
+#include <node/kernel_mempool.h>
 #include <node/kernel_notifications.h>
 #include <node/miner.h>
 #include <node/mining_args.h>
@@ -297,6 +298,7 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
     bilingual_str error{};
     m_node.mempool = std::make_unique<CTxMemPool>(MemPoolOptionsForTest(m_node), error);
     Assert(error.empty());
+    m_node.kernel_mempool = std::make_unique<node::KernelMempool>(*m_node.mempool);
     m_node.warnings = std::make_unique<node::Warnings>();
 
     m_node.notifications = std::make_unique<KernelNotifications>(Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
@@ -354,9 +356,10 @@ ChainTestingSetup::~ChainTestingSetup()
     m_node.addrman.reset();
     m_node.netgroupman.reset();
     m_node.args = nullptr;
+    m_node.chainman.reset();
+    m_node.kernel_mempool.reset();
     m_node.mempool.reset();
     Assert(!m_node.fee_estimator_man); // Each test must create a local object, if they wish to use the fee_estimator_man
-    m_node.chainman.reset();
     m_node.validation_signals.reset();
     m_node.scheduler.reset();
 }
@@ -366,6 +369,7 @@ void ChainTestingSetup::LoadVerifyActivateChainstate()
     auto& chainman{*Assert(m_node.chainman)};
     node::ChainstateLoadOptions options;
     options.mempool = Assert(m_node.mempool.get());
+    options.kernel_mempool = Assert(m_node.kernel_mempool.get());
     options.coins_db_in_memory = m_coins_db_in_memory;
     options.wipe_chainstate_db = m_args.GetBoolArg("-reindex", false) || m_args.GetBoolArg("-reindex-chainstate", false);
     options.prune = chainman.m_blockman.IsPruneMode();

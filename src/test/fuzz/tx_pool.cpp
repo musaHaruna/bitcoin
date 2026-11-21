@@ -7,6 +7,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <node/kernel_mempool.h>
 #include <node/miner.h>
 #include <node/mining_types.h>
 #include <policy/feerate.h>
@@ -321,7 +322,8 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool_standard)
     auto tx_pool_{MakeMempool(fuzzed_data_provider, node)};
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(tx_pool_.get());
 
-    chainstate.SetMempool(&tx_pool);
+    node::KernelMempool mempool_adapter{tx_pool};
+    chainstate.SetMempool(&tx_pool, &mempool_adapter);
 
     bool accepted_transaction{false};
 
@@ -484,6 +486,9 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool_standard)
     }
     ObserveReachabilityGoal(accepted_transaction, TX_POOL_STANDARD_ACCEPTS_TRANSACTION);
     Finish(fuzzed_data_provider, tx_pool, chainstate);
+
+    // Restore the fixture before the per-input adapter and pool are destroyed.
+    chainstate.SetMempool(node.mempool.get(), node.kernel_mempool.get());
 }
 
 FUZZ_TARGET(tx_pool, .init = initialize_tx_pool)
@@ -510,7 +515,8 @@ FUZZ_TARGET(tx_pool, .init = initialize_tx_pool)
     auto tx_pool_{MakeMempool(fuzzed_data_provider, node)};
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(tx_pool_.get());
 
-    chainstate.SetMempool(&tx_pool);
+    node::KernelMempool mempool_adapter{tx_pool};
+    chainstate.SetMempool(&tx_pool, &mempool_adapter);
 
     bool accepted_transaction{false};
 
@@ -550,5 +556,8 @@ FUZZ_TARGET(tx_pool, .init = initialize_tx_pool)
     }
     ObserveReachabilityGoal(accepted_transaction, TX_POOL_ACCEPTS_TRANSACTION);
     Finish(fuzzed_data_provider, tx_pool, chainstate);
+
+    // Restore the fixture before the per-input adapter and pool are destroyed.
+    chainstate.SetMempool(node.mempool.get(), node.kernel_mempool.get());
 }
 } // namespace

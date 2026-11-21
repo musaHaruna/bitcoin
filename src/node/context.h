@@ -46,6 +46,7 @@ class SignalInterrupt;
 
 namespace node {
 class BlockTemplateManager;
+class KernelMempool;
 class KernelNotifications;
 class Warnings;
 
@@ -89,6 +90,8 @@ struct NodeContext {
     std::unique_ptr<AddrMan> addrman;
     std::unique_ptr<CConnman> connman;
     std::unique_ptr<CTxMemPool> mempool;
+    //! Adapter is destroyed after chainman and before its referenced pool.
+    std::unique_ptr<KernelMempool> kernel_mempool;
     std::unique_ptr<const NetGroupManager> netgroupman;
     std::unique_ptr<FeeRateEstimatorManager> fee_estimator_man;
     std::unique_ptr<PeerManager> peerman;

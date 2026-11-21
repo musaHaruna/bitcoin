@@ -1857,12 +1857,18 @@ Chainstate::Chainstate(
     CTxMemPool* mempool,
     BlockManager& blockman,
     ChainstateManager& chainman,
-    std::optional<uint256> from_snapshot_blockhash)
+    std::optional<uint256> from_snapshot_blockhash,
+    kernel::Mempool* kernel_mempool)
     : m_mempool(mempool),
+      m_kernel_mempool(kernel_mempool),
       m_blockman(blockman),
       m_chainman(chainman),
       m_assumeutxo(from_snapshot_blockhash ? Assumeutxo::UNVALIDATED : Assumeutxo::VALIDATED),
-      m_from_snapshot_blockhash(from_snapshot_blockhash) {}
+      m_from_snapshot_blockhash(from_snapshot_blockhash)
+{
+    // During migration, both pointers must be present or both absent.
+    assert((m_mempool == nullptr) == (m_kernel_mempool == nullptr));
+}
 
 fs::path Chainstate::StoragePath() const
 {
@@ -3062,7 +3068,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         // Save transactions to re-add to mempool at end of reorg. If any entries are evicted for
         // exceeding memory limits, remove them and their descendants from the mempool.
         for (auto&& evicted_tx : disconnectpool->AddTransactionsFromBlock(block.vtx)) {
-            m_mempool->removeRecursive(*evicted_tx, MemPoolRemovalReason::REORG);
+            m_kernel_mempool->RemoveRecursiveForReorg(*evicted_tx);
         }
     }
 
@@ -5635,11 +5641,11 @@ double ChainstateManager::GetBackgroundVerificationProgress(const CBlockIndex& p
     return static_cast<double>(pindex.m_chain_tx_count) / static_cast<double>(target_block->m_chain_tx_count);
 }
 
-Chainstate& ChainstateManager::InitializeChainstate(CTxMemPool* mempool)
+Chainstate& ChainstateManager::InitializeChainstate(CTxMemPool* mempool, kernel::Mempool* kernel_mempool)
 {
     AssertLockHeld(::cs_main);
     assert(m_chainstates.empty());
-    m_chainstates.emplace_back(std::make_unique<Chainstate>(mempool, m_blockman, *this));
+    m_chainstates.emplace_back(std::make_unique<Chainstate>(mempool, m_blockman, *this, std::nullopt, kernel_mempool));
     return *m_chainstates.back();
 }
 
@@ -6277,11 +6283,13 @@ Chainstate& ChainstateManager::AddChainstate(std::unique_ptr<Chainstate> chainst
     Chainstate& curr_chainstate{CurrentChainstate()};
     assert(&curr_chainstate == m_chainstates.back().get());
 
-    // Transfer possession of the mempool to the chainstate.
+    // Move the mempool pointers to the new active chainstate; the node still owns the pool.
     // Mempool is empty at this point because we're still in IBD.
     assert(!prev_chainstate.m_mempool || prev_chainstate.m_mempool->size() == 0);
     assert(!curr_chainstate.m_mempool);
     std::swap(curr_chainstate.m_mempool, prev_chainstate.m_mempool);
+    assert(!curr_chainstate.m_kernel_mempool);
+    std::swap(curr_chainstate.m_kernel_mempool, prev_chainstate.m_kernel_mempool);
     return curr_chainstate;
 }
 
@@ -6344,6 +6352,8 @@ bool ChainstateManager::DeleteChainstate(Chainstate& chainstate)
     assert(!prev_chainstate->m_mempool || prev_chainstate->m_mempool->size() == 0);
     assert(!curr_chainstate.m_mempool);
     std::swap(curr_chainstate.m_mempool, prev_chainstate->m_mempool);
+    assert(!curr_chainstate.m_kernel_mempool);
+    std::swap(curr_chainstate.m_kernel_mempool, prev_chainstate->m_kernel_mempool);
     return true;
 }
 

@@ -7,6 +7,7 @@
 
 #include <clientversion.h>
 #include <node/context.h>
+#include <node/kernel_mempool.h>
 #include <node/utxo_snapshot.h>
 #include <rpc/blockchain.h>
 #include <test/util/setup_common.h>
@@ -78,7 +79,7 @@ CreateAndActivateUTXOSnapshot(
             CBlockIndex *orig_tip = node.chainman->ActiveChainstate().m_chain.Tip();
             uint256 gen_hash = node.chainman->ActiveChainstate().m_chain[0]->GetBlockHash();
             node.chainman->ResetChainstates();
-            node.chainman->InitializeChainstate(node.mempool.get());
+            node.chainman->InitializeChainstate(node.mempool.get(), node.kernel_mempool.get());
             Chainstate& chain = node.chainman->ActiveChainstate();
             Assert(node.chainman->LoadGenesisBlock());
             // These cache values will be corrected shortly in `MaybeRebalanceCaches`.

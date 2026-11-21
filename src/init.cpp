@@ -60,6 +60,7 @@
 #include <node/context.h>
 #include <node/indexes.h>
 #include <node/interface_ui.h>
+#include <node/kernel_mempool.h>
 #include <node/kernel_notifications.h>
 #include <node/mempool_args.h>
 #include <node/mempool_persist.h>
@@ -427,8 +428,9 @@ void Shutdown(NodeContext& node)
     }
     node.fee_estimator_man.reset();
     node.block_template_manager.reset();
-    node.mempool.reset();
     node.chainman.reset();
+    node.kernel_mempool.reset();
+    node.mempool.reset();
     node.validation_signals.reset();
     node.scheduler.reset();
     node.ecc_context.reset();
@@ -1408,8 +1410,9 @@ static ChainstateLoadResult InitAndLoadChainstate(
     // This function may be called twice, so any dirty state must be reset.
     node.notifications->setChainstateLoaded(false); // Drop state, such as a cached tip block
     node.block_template_manager.reset();
-    node.mempool.reset();
     node.chainman.reset(); // Drop state, such as an initialized m_block_tree_db
+    node.kernel_mempool.reset();
+    node.mempool.reset();
 
     const CChainParams& chainparams = Params();
 
@@ -1424,6 +1427,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
     if (!mempool_error.empty()) {
         return {ChainstateLoadStatus::FAILURE_FATAL, mempool_error};
     }
+    node.kernel_mempool = std::make_unique<node::KernelMempool>(*node.mempool);
     LogInfo("* Using %.1f MiB for in-memory UTXO set (plus up to %.1f MiB of unused mempool space)",
             cache_sizes.coins / double(1_MiB),
             mempool_opts.max_size_bytes / double(1_MiB));
@@ -1484,6 +1488,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
     };
     node::ChainstateLoadOptions options;
     options.mempool = Assert(node.mempool.get());
+    options.kernel_mempool = Assert(node.kernel_mempool.get());
     options.wipe_chainstate_db = do_reindex || do_reindex_chainstate;
     options.prune = chainman.m_blockman.IsPruneMode();
     options.check_blocks = args.GetIntArg("-checkblocks", DEFAULT_CHECKBLOCKS);

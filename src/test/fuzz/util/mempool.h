@@ -6,7 +6,10 @@
 #define BITCOIN_TEST_FUZZ_UTIL_MEMPOOL_H
 
 #include <kernel/mempool_entry.h>
+#include <kernel/mempool_interface.h>
 #include <validation.h>
+
+#include <cassert>
 
 class CTransaction;
 class CTxMemPool;
@@ -15,9 +18,11 @@ class FuzzedDataProvider;
 class DummyChainState final : public Chainstate
 {
 public:
-    void SetMempool(CTxMemPool* mempool)
+    void SetMempool(CTxMemPool* pool, kernel::Mempool* adapter)
     {
-        m_mempool = mempool;
+        assert((pool == nullptr) == (adapter == nullptr));
+        m_mempool = pool;
+        m_kernel_mempool = adapter;
     }
 };
 

@@ -18,6 +18,7 @@
 #include <kernel/chainparams.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <kernel/cs_main.h> // IWYU pragma: export
+#include <kernel/mempool_interface.h>
 #include <node/blockstorage.h>
 #include <policy/feerate.h>
 #include <policy/packages.h>
@@ -559,6 +560,8 @@ protected:
     //! Optional mempool that is kept in sync with the chain.
     //! Only the active chainstate has a mempool.
     CTxMemPool* m_mempool;
+    //! Interface for the same pool, kept alongside the concrete pointer until callers are migrated.
+    kernel::Mempool* m_kernel_mempool;
 
     //! Manages the UTXO set, which is a reflection of the contents of `m_chain`.
     std::unique_ptr<CoinsViews> m_coins_views;
@@ -591,7 +594,8 @@ public:
         CTxMemPool* mempool,
         node::BlockManager& blockman,
         ChainstateManager& chainman,
-        std::optional<uint256> from_snapshot_blockhash = std::nullopt);
+        std::optional<uint256> from_snapshot_blockhash = std::nullopt,
+        kernel::Mempool* kernel_mempool = nullptr);
 
     //! Return path to chainstate leveldb directory.
     fs::path StoragePath() const;
@@ -1108,7 +1112,7 @@ public:
     //!
     //! @param[in] mempool              The mempool to pass to the chainstate
     //                                  constructor
-    Chainstate& InitializeChainstate(CTxMemPool* mempool) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    Chainstate& InitializeChainstate(CTxMemPool* mempool, kernel::Mempool* kernel_mempool = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Construct and activate a Chainstate on the basis of UTXO snapshot data.
     //!
