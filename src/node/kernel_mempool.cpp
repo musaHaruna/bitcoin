@@ -19,4 +19,5 @@ std::vector<RemovedMempoolTransactionInfo> KernelMempool::removeForBlock(const s
 
 size_t KernelMempool::DynamicMemoryUsage() const { return m_mempool.DynamicMemoryUsage(); }
 void KernelMempool::AddTransactionsUpdated(unsigned int n) { m_mempool.AddTransactionsUpdated(n); }
+void KernelMempool::check(const CCoinsViewCache& coins, int64_t spend_height) const { m_mempool.check(coins, spend_height); }
 } // namespace node

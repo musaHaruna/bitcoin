@@ -11,8 +11,10 @@
 #include <sync.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
+class CCoinsViewCache;
 class CTransaction;
 
 namespace kernel {
@@ -36,6 +38,9 @@ public:
     virtual size_t DynamicMemoryUsage() const = 0;
     /** Advance the update counter; synchronize internally if needed. */
     virtual void AddTransactionsUpdated(unsigned int n) = 0;
+    /** Check pool consistency against coins; acquire the pool mutex if needed. */
+    virtual void check(const CCoinsViewCache& coins, int64_t spend_height) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
 };
 } // namespace kernel
 
