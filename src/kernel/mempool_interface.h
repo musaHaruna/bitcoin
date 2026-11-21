@@ -10,6 +10,7 @@
 #include <primitives/transaction.h>
 #include <sync.h>
 
+#include <cstddef>
 #include <vector>
 
 class CTransaction;
@@ -31,6 +32,8 @@ public:
     /** Return owned metadata for confirmed pool transactions in block order. */
     virtual std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& txs)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
+    /** Return current dynamic memory usage; synchronize internally if needed. */
+    virtual size_t DynamicMemoryUsage() const = 0;
 };
 } // namespace kernel
 

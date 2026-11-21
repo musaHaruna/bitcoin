@@ -16,4 +16,6 @@ std::vector<RemovedMempoolTransactionInfo> KernelMempool::removeForBlock(const s
     AssertLockHeld(m_mempool.cs);
     return m_mempool.removeForBlock(txs);
 }
+
+size_t KernelMempool::DynamicMemoryUsage() const { return m_mempool.DynamicMemoryUsage(); }
 } // namespace node

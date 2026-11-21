@@ -19,6 +19,7 @@ public:
     void RemoveRecursiveForReorg(const CTransaction& tx) override EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
     std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& txs) override
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
+    size_t DynamicMemoryUsage() const override;
 };
 } // namespace node
 
