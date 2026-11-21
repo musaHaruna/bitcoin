@@ -22,6 +22,27 @@ struct Dersig100Setup : public TestChain100Setup {
 
 BOOST_AUTO_TEST_SUITE(txvalidationcache_tests)
 
+BOOST_FIXTURE_TEST_CASE(script_failure_classification, TestChain100Setup)
+{
+    LOCK(cs_main);
+    CCoinsViewCache coins{&CoinsViewEmpty::Get()};
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
+    tx.vout.emplace_back(COIN, CScript{} << OP_TRUE);
+    coins.AddCoin(tx.vin[0].prevout, Coin{CTxOut{COIN, CScript{} << OP_FALSE}, 1, false}, false);
+    PrecomputedTransactionData txdata;
+    const CTransaction spend{tx};
+    for (const auto check_for : {CheckInputScriptsFor::Block, CheckInputScriptsFor::Mempool}) {
+        TxValidationState state;
+        BOOST_CHECK(!CheckInputScripts(spend, state, coins, STANDARD_SCRIPT_VERIFY_FLAGS, check_for, true, true,
+                                       txdata, m_node.chainman->m_validation_cache));
+        BOOST_CHECK(state.GetResult() == (check_for == CheckInputScriptsFor::Mempool ? TxValidationResult::TX_NOT_STANDARD : TxValidationResult::TX_CONSENSUS));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), check_for == CheckInputScriptsFor::Mempool
+            ? "mempool-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)"
+            : "block-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)");
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(tx_mempool_block_doublespend, Dersig100Setup)
 {
     // Make sure skipping validation of transactions that were
