@@ -16,6 +16,7 @@
 #include <netaddress.h>
 #include <netbase.h>
 #include <node/context.h>
+#include <node/mempool_accept.h>
 #include <node/mempool_persist.h>
 #include <node/mempool_persist_args.h>
 #include <node/transaction.h>

@@ -4,6 +4,8 @@
 
 #include <node/kernel_mempool.h>
 
+#include <node/mempool_accept.h>
+
 namespace node {
 void KernelMempool::RemoveRecursiveForReorg(const CTransaction& tx)
 {
@@ -22,4 +24,10 @@ void KernelMempool::AddTransactionsUpdated(unsigned int n) { m_mempool.AddTransa
 void KernelMempool::check(const CCoinsViewCache& coins, int64_t spend_height) const { m_mempool.check(coins, spend_height); }
 bool KernelMempool::Empty() const { return m_mempool.size() == 0; }
 size_t KernelMempool::MaxSizeBytes() const { return m_mempool.m_opts.max_size_bytes; }
+
+void KernelMempool::UpdateForReorg(Chainstate& chainstate, DisconnectedBlockTransactions& disconnected, bool add_to_mempool)
+{
+    AssertLockHeld(m_mempool.cs);
+    UpdateMempoolForReorg(chainstate, m_mempool, disconnected, add_to_mempool);
+}
 } // namespace node

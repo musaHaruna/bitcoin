@@ -14,8 +14,10 @@
 #include <cstdint>
 #include <vector>
 
+class Chainstate;
 class CCoinsViewCache;
 class CTransaction;
+class DisconnectedBlockTransactions;
 
 namespace kernel {
 /** Internal, synchronous integration with a node's transaction pool.
@@ -45,6 +47,14 @@ public:
     virtual bool Empty() const = 0;
     /** Return the configured pool capacity; synchronize internally if needed. */
     virtual size_t MaxSizeBytes() const = 0;
+    /**
+     * Reconcile the pool with chainstate after disconnection and drain disconnected.
+     * When add_to_mempool is false, perform removal/cleanup without readmission;
+     * the entire queue must still be consumed.
+     */
+    virtual void UpdateForReorg(Chainstate& chainstate, DisconnectedBlockTransactions& disconnected,
+                               bool add_to_mempool)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
 };
 } // namespace kernel
 

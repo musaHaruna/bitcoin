@@ -6,6 +6,7 @@
 
 #include <chainparams.h>
 #include <node/context.h>
+#include <node/mempool_accept.h>
 #include <node/mempool_args.h>
 #include <policy/rbf.h>
 #include <policy/truc_policy.h>

@@ -24,6 +24,8 @@ public:
     void check(const CCoinsViewCache& coins, int64_t spend_height) const override EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool Empty() const override;
     size_t MaxSizeBytes() const override;
+    void UpdateForReorg(Chainstate& chainstate, DisconnectedBlockTransactions& disconnected,
+                       bool add_to_mempool) override EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
 };
 } // namespace node
 

@@ -4,6 +4,7 @@
 
 #include <consensus/validation.h>
 #include <key_io.h>
+#include <node/mempool_accept.h>
 #include <policy/packages.h>
 #include <policy/policy.h>
 #include <policy/rbf.h>
