@@ -5727,8 +5727,8 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
             return util::Error{Untranslated("A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo.")};
         }
 
-        auto mempool{CurrentChainstate().GetMempool()};
-        if (mempool && mempool->size() > 0) {
+        auto mempool{CurrentChainstate().m_kernel_mempool};
+        if (mempool && !mempool->Empty()) {
             return util::Error{Untranslated("Can't activate a snapshot when mempool not empty")};
         }
     }
@@ -6285,7 +6285,7 @@ Chainstate& ChainstateManager::AddChainstate(std::unique_ptr<Chainstate> chainst
 
     // Move the mempool pointers to the new active chainstate; the node still owns the pool.
     // Mempool is empty at this point because we're still in IBD.
-    assert(!prev_chainstate.m_mempool || prev_chainstate.m_mempool->size() == 0);
+    assert(!prev_chainstate.m_kernel_mempool || prev_chainstate.m_kernel_mempool->Empty());
     assert(!curr_chainstate.m_mempool);
     std::swap(curr_chainstate.m_mempool, prev_chainstate.m_mempool);
     assert(!curr_chainstate.m_kernel_mempool);
@@ -6349,7 +6349,7 @@ bool ChainstateManager::DeleteChainstate(Chainstate& chainstate)
     }
     std::unique_ptr<Chainstate> prev_chainstate{Assert(RemoveChainstate(chainstate))};
     Chainstate& curr_chainstate{CurrentChainstate()};
-    assert(!prev_chainstate->m_mempool || prev_chainstate->m_mempool->size() == 0);
+    assert(!prev_chainstate->m_kernel_mempool || prev_chainstate->m_kernel_mempool->Empty());
     assert(!curr_chainstate.m_mempool);
     std::swap(curr_chainstate.m_mempool, prev_chainstate->m_mempool);
     assert(!curr_chainstate.m_kernel_mempool);

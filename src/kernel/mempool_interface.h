@@ -41,6 +41,8 @@ public:
     /** Check pool consistency against coins; acquire the pool mutex if needed. */
     virtual void check(const CCoinsViewCache& coins, int64_t spend_height) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
+    /** Return whether the pool is empty; synchronize internally if needed. */
+    virtual bool Empty() const = 0;
 };
 } // namespace kernel
 
