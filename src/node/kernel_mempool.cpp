@@ -10,4 +10,10 @@ void KernelMempool::RemoveRecursiveForReorg(const CTransaction& tx)
     AssertLockHeld(m_mempool.cs);
     m_mempool.removeRecursive(tx, MemPoolRemovalReason::REORG);
 }
+
+std::vector<RemovedMempoolTransactionInfo> KernelMempool::removeForBlock(const std::vector<CTransactionRef>& txs)
+{
+    AssertLockHeld(m_mempool.cs);
+    return m_mempool.removeForBlock(txs);
+}
 } // namespace node

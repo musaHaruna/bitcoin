@@ -17,6 +17,8 @@ class KernelMempool final : public kernel::Mempool
 public:
     explicit KernelMempool(CTxMemPool& pool) : m_mempool{pool} {}
     void RemoveRecursiveForReorg(const CTransaction& tx) override EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
+    std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& txs) override
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool.cs);
 };
 } // namespace node
 

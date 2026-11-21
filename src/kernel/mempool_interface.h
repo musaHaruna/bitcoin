@@ -6,7 +6,11 @@
 #define BITCOIN_KERNEL_MEMPOOL_INTERFACE_H
 
 #include <kernel/cs_main.h>
+#include <kernel/mempool_events.h>
+#include <primitives/transaction.h>
 #include <sync.h>
+
+#include <vector>
 
 class CTransaction;
 
@@ -23,6 +27,9 @@ public:
     virtual ~Mempool() = default;
     /** Remove this transaction and its descendants after disconnect-queue eviction. */
     virtual void RemoveRecursiveForReorg(const CTransaction& tx)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
+    /** Return owned metadata for confirmed pool transactions in block order. */
+    virtual std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& txs)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
 };
 } // namespace kernel
