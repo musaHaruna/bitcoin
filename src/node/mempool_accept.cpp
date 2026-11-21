@@ -1721,3 +1721,17 @@ PackageMempoolAcceptResult ProcessNewPackage(Chainstate& active_chainstate, CTxM
     active_chainstate.FlushStateToDisk(state_dummy, FlushStateMode::PERIODIC);
     return result;
 }
+
+MempoolAcceptResult node::ProcessTransaction(Chainstate& active_chainstate, CTxMemPool* pool, const CTransactionRef& tx, bool test_accept)
+{
+    AssertLockHeld(cs_main);
+    if (!pool || !active_chainstate.GetMempool()) {
+        TxValidationState state;
+        state.Invalid(TxValidationResult::TX_NO_MEMPOOL, "no-mempool");
+        return MempoolAcceptResult::Failure(state);
+    }
+    assert(active_chainstate.MempoolMutex() == &pool->cs);
+    auto result = AcceptToMemoryPool(active_chainstate, *pool, tx, GetTime(), /*bypass_limits=*/ false, test_accept);
+    pool->check(active_chainstate.CoinsTip(), active_chainstate.m_chain.Height() + 1);
+    return result;
+}

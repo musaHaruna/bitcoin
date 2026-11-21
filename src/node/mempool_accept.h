@@ -19,7 +19,7 @@ struct LockPoints;
 
 /**
  * Try to add a transaction to the mempool. This is an internal function and is exposed only for testing.
- * Client code should use ChainstateManager::ProcessTransaction()
+ * Client code should use node::ProcessTransaction()
  *
  * @param[in]  active_chainstate  Reference to the active chainstate.
  * @param[in]  pool               Mempool attached to active_chainstate and receiving the transaction.
@@ -93,6 +93,11 @@ bool CheckSequenceLocksAtTip(CBlockIndex* tip,
                              const LockPoints& lock_points);
 
 namespace node {
+/** Submit a transaction using Bitcoin Core policy. Returns TX_NO_MEMPOOL if no pool is attached. */
+[[nodiscard]] MempoolAcceptResult ProcessTransaction(Chainstate& chainstate, CTxMemPool* pool,
+                                                    const CTransactionRef& tx, bool test_accept = false)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
 /** Drain disconnected transactions, reconcile entries with the new tip, then enforce pool limits. */
 void UpdateMempoolForReorg(Chainstate& chainstate, CTxMemPool& pool,
                           DisconnectedBlockTransactions& disconnectpool, bool add_to_mempool)

@@ -9,6 +9,7 @@
 #include <consensus/validation.h>
 #include <node/block_template_manager.h>
 #include <node/blockstorage.h>
+#include <node/mempool_accept.h>
 #include <node/miner.h>
 #include <pow.h>
 #include <primitives/block.h>
@@ -298,7 +299,7 @@ BOOST_AUTO_TEST_CASE(mempool_locks_reorg)
         {
             LOCK(cs_main);
             for (const auto& tx : txs) {
-                const MempoolAcceptResult result = m_node.chainman->ProcessTransaction(tx);
+                const MempoolAcceptResult result = node::ProcessTransaction(m_node.chainman->ActiveChainstate(), m_node.mempool.get(), tx);
                 BOOST_REQUIRE(result.m_result_type == MempoolAcceptResult::ResultType::VALID);
             }
         }

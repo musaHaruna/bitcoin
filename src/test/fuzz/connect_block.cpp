@@ -8,6 +8,7 @@
 #include <consensus/merkle.h>
 #include <node/block_template_manager.h>
 #include <node/kernel_notifications.h>
+#include <node/mempool_accept.h>
 #include <node/mining_types.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -215,7 +216,7 @@ void AddExtraTxsToMempool(TestingSetup& setup)
 
         LOCK(::cs_main);
         // Add transaction to the mempool.
-        const MempoolAcceptResult ctx_result = setup.m_node.chainman->ProcessTransaction(MakeTransactionRef(ctx));
+        const MempoolAcceptResult ctx_result = node::ProcessTransaction(setup.m_node.chainman->ActiveChainstate(), setup.m_node.mempool.get(), MakeTransactionRef(ctx));
         Assert(ctx_result.m_result_type == MempoolAcceptResult::ResultType::VALID);
 
         Assert(setup.m_node.chainman->ActiveChainstate().GetMempool()->size() == i);
