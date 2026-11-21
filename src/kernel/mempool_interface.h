@@ -43,6 +43,8 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main) = 0;
     /** Return whether the pool is empty; synchronize internally if needed. */
     virtual bool Empty() const = 0;
+    /** Return the configured pool capacity; synchronize internally if needed. */
+    virtual size_t MaxSizeBytes() const = 0;
 };
 } // namespace kernel
 

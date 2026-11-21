@@ -23,6 +23,7 @@ public:
     void AddTransactionsUpdated(unsigned int n) override;
     void check(const CCoinsViewCache& coins, int64_t spend_height) const override EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool Empty() const override;
+    size_t MaxSizeBytes() const override;
 };
 } // namespace node
 

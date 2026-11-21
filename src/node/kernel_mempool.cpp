@@ -21,4 +21,5 @@ size_t KernelMempool::DynamicMemoryUsage() const { return m_mempool.DynamicMemor
 void KernelMempool::AddTransactionsUpdated(unsigned int n) { m_mempool.AddTransactionsUpdated(n); }
 void KernelMempool::check(const CCoinsViewCache& coins, int64_t spend_height) const { m_mempool.check(coins, spend_height); }
 bool KernelMempool::Empty() const { return m_mempool.size() == 0; }
+size_t KernelMempool::MaxSizeBytes() const { return m_mempool.m_opts.max_size_bytes; }
 } // namespace node

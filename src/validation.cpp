@@ -2755,7 +2755,7 @@ CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState()
     AssertLockHeld(::cs_main);
     return this->GetCoinsCacheSizeState(
         m_coinstip_cache_size_bytes,
-        m_mempool ? m_mempool->m_opts.max_size_bytes : 0);
+        m_kernel_mempool ? m_kernel_mempool->MaxSizeBytes() : 0);
 }
 
 CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState(
