@@ -6,12 +6,14 @@
 #define BITCOIN_POLICY_FEES_BLOCK_POLICY_ESTIMATOR_H
 
 #include <consensus/amount.h>
+#include <kernel/mempool_removal_reason.h>
 #include <policy/feerate.h>
-#include <primitives/transaction_identifier.h>
+#include <policy/fees/chunk_confirm_stats.h>
 #include <random.h>
 #include <sync.h>
 #include <uint256.h>
 #include <util/expected.h>
+#include <util/feefrac.h>
 #include <util/fees.h>
 #include <util/fs.h>
 
@@ -19,6 +21,7 @@
 #include <chrono>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -34,11 +37,10 @@ inline constexpr std::chrono::hours MAX_FILE_AGE{60};
 inline constexpr bool DEFAULT_ACCEPT_STALE_FEE_ESTIMATES{false};
 
 class AutoFile;
-class TxConfirmStats;
-struct RemovedMempoolTransactionInfo;
-struct NewMempoolTransactionInfo;
+struct MemPoolChunk;
+struct MemPoolChunksUpdate;
 
-/* Identifier for each of the 3 different TxConfirmStats which will track
+/* Identifier for each of the 3 different ChunkConfirmStats which will track
  * history over different time horizons. */
 enum class FeeEstimateHorizon {
     SHORT_HALFLIFE,
@@ -65,25 +67,10 @@ enum class BlockPolicyEstimateReason {
 
 std::string StringForBlockPolicyEstimateReason(BlockPolicyEstimateReason reason);
 
-/* Used to return detailed information about a feerate bucket */
-struct EstimatorBucket
-{
-    double start = -1;
-    double end = -1;
-    double withinTarget = 0;
-    double totalConfirmed = 0;
-    double inMempool = 0;
-    double leftMempool = 0;
-};
+std::string StringForChunkEndReason(MemPoolChunkEndReason reason);
 
-/* Used to return detailed information about a fee estimate calculation */
-struct EstimationResult
-{
-    EstimatorBucket pass;
-    EstimatorBucket fail;
-    double decay = 0;
-    unsigned int scale = 0;
-};
+using EstimatorBucket = ChunkConfirmStats::Bucket;
+using EstimationResult = ChunkConfirmStats::Result;
 
 struct FeeCalculation
 {
@@ -94,53 +81,21 @@ struct FeeCalculation
     unsigned int best_height{0};
 };
 
-/** \class CBlockPolicyEstimator
- * The BlockPolicyEstimator is used for estimating the feerate needed
- * for a transaction to be included in a block within a certain number of
- * blocks.
+/** Estimate confirmation fees from continuously observed mempool chunks.
  *
- * At a high level the algorithm works by grouping transactions into buckets
- * based on having similar feerates and then tracking how long it
- * takes transactions in the various buckets to be mined.  It operates under
- * the assumption that in general transactions of higher feerate will be
- * included in blocks before transactions of lower feerate.   So for
- * example if you wanted to know what feerate you should put on a transaction to
- * be included in a block within the next 5 blocks, you would start by looking
- * at the bucket with the highest feerate transactions and verifying that a
- * sufficiently high percentage of them were confirmed within 5 blocks and
- * then you would look at the next highest feerate bucket, and so on, stopping at
- * the last bucket to pass the test.   The average feerate of transactions in this
- * bucket will give you an indication of the lowest feerate you can put on a
- * transaction and still have a sufficiently high chance of being confirmed
- * within your desired 5 blocks.
+ * Each eligible chunk is one observation: its exact membership, aggregate
+ * fee/weight, and the height when that configuration became observable.
+ * Unchanged configurations retain their original age. Only a producer-proven
+ * usable full confirmation immediately records success for every target it met.
+ * Remaining observations enter each target at start+target: a known miss is a
+ * failure; an earlier ending is unknown. Successes decay from confirmation;
+ * failures and unknowns decay from their deadline. Aggregated cohorts retain
+ * unresolved targets for at most 1008 blocks. Gaps close active
+ * observations as unknown; reorgs cold-reset historical and pending evidence.
+ * Estimates use successes and known failures. Unknowns are diagnostic only and
+ * do not contribute to the success ratio, sample support, or average feerates.
  *
- * Here is a brief description of the implementation:
- * When a transaction enters the mempool, we track the height of the block chain
- * at entry.  All further calculations are conducted only on this set of "seen"
- * transactions. Whenever a block comes in, we count the number of transactions
- * in each bucket and the total amount of feerate paid in each bucket. Then we
- * calculate how many blocks Y it took each transaction to be mined.  We convert
- * from a number of blocks to a number of periods Y' each encompassing "scale"
- * blocks.  This is tracked in 3 different data sets each up to a maximum
- * number of periods. Within each data set we have an array of counters in each
- * feerate bucket and we increment all the counters from Y' up to max periods
- * representing that a tx was successfully confirmed in less than or equal to
- * that many periods. We want to save a history of this information, so at any
- * time we have a counter of the total number of transactions that happened in a
- * given feerate bucket and the total number that were confirmed in each of the
- * periods or less for any bucket.  We save this history by keeping an
- * exponentially decaying moving average of each one of these stats.  This is
- * done for a different decay in each of the 3 data sets to keep relevant data
- * from different time horizons.  Furthermore we also keep track of the number
- * unmined (in mempool or left mempool without being included in a block)
- * transactions in each bucket and for how many blocks they have been
- * outstanding and use both of these numbers to increase the number of transactions
- * we've seen in that feerate bucket when calculating an estimate for any number
- * of confirmations below the number of blocks they've been outstanding.
- *
- *  We want to be able to estimate feerates that are needed on tx's to be included in
- * a certain number of blocks.  Every time a block is added to the best chain, this class records
- * stats on the transactions included in that block
+ * processMempoolUpdate is the sole clock input, including empty block updates.
  */
 class CBlockPolicyEstimator
 {
@@ -164,17 +119,17 @@ private:
     /** Decay of .99931 is a half-life of 1008 blocks or about 1 week */
     static constexpr double LONG_DECAY = .99931;
 
-    /** Require greater than 60% of X feerate transactions to be confirmed within Y/2 blocks*/
+    /** Require greater than 60% of X feerate chunks to be confirmed within Y/2 blocks*/
     static constexpr double HALF_SUCCESS_PCT = .6;
-    /** Require greater than 85% of X feerate transactions to be confirmed within Y blocks*/
+    /** Require greater than 85% of X feerate chunks to be confirmed within Y blocks*/
     static constexpr double SUCCESS_PCT = .85;
-    /** Require greater than 95% of X feerate transactions to be confirmed within 2 * Y blocks*/
+    /** Require greater than 95% of X feerate chunks to be confirmed within 2 * Y blocks*/
     static constexpr double DOUBLE_SUCCESS_PCT = .95;
 
-    /** Require an avg of 0.1 tx in the combined feerate bucket per block to have stat significance */
-    static constexpr double SUFFICIENT_FEETXS = 0.1;
-    /** Require an avg of 0.5 tx when using short decay since there are fewer blocks considered*/
-    static constexpr double SUFFICIENT_TXS_SHORT = 0.5;
+    /** Require an avg of 0.1 chunk in the combined feerate bucket per block to have stat significance */
+    static constexpr double SUFFICIENT_FEE_CHUNKS = 0.1;
+    /** Require an avg of 0.5 chunk when using short decay since there are fewer blocks considered*/
+    static constexpr double SUFFICIENT_CHUNKS_SHORT = 0.5;
 
     /** Minimum and Maximum values for tracking feerates
      * The MIN_BUCKET_FEERATE should just be set to the lowest reasonable feerate.
@@ -189,7 +144,7 @@ private:
     static constexpr double MAX_BUCKET_FEERATE = 1e7;
 
     /** Spacing of FeeRate buckets
-     * We have to lump transactions into buckets based on feerate, but we want to be able
+     * We have to lump chunks into buckets based on feerate, but we want to be able
      * to give accurate estimates over a large range of potential feerates
      * Therefore it makes sense to exponentially space the buckets
      */
@@ -201,27 +156,25 @@ public:
     CBlockPolicyEstimator(const fs::path& estimation_filepath, bool read_stale_estimates);
     virtual ~CBlockPolicyEstimator();
 
-    /** Process all the transactions that have been included in a block */
-    void processBlock(const std::vector<RemovedMempoolTransactionInfo>& txs_removed_for_block,
-                      unsigned int nBlockHeight)
+    /** Consume an owned, ordered chunk transition, advancing block statistics once. */
+    void processMempoolUpdate(const MemPoolChunksUpdate& update)
         EXCLUSIVE_LOCKS_REQUIRED(!m_cs_fee_estimator);
 
-    /** Process a transaction accepted to the mempool*/
-    void processTransaction(const NewMempoolTransactionInfo& tx)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_cs_fee_estimator);
-
-    /** Remove a transaction from the mempool tracking stats for non BLOCK removal reasons*/
-    bool removeTx(Txid hash)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_cs_fee_estimator);
+    /** Check pending counters against live observations; intended for tests/fuzzing. */
+    void SanityCheck() const EXCLUSIVE_LOCKS_REQUIRED(!m_cs_fee_estimator);
 
     /** DEPRECATED. Return a feerate estimate */
     CFeeRate estimateFee(int confTarget) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_cs_fee_estimator);
 
-    /** Estimate feerate needed to get be included in a block within confTarget
-     *  blocks. If no answer can be given at confTarget, return an estimate at
-     *  the closest target where one can be given.  'conservative' estimates are
-     *  valid over longer time horizons also.
+    /** Estimate the feerate needed to confirm within confTarget blocks.
+     *  After normalizing and limiting the target to available history, return
+     *  the lowest valid smart estimate at that target or any tighter target
+     *  down to 2. This prevents a looser target from raising the estimate.
+     *  feeCalc reports the winning target and its calculation, preferring the
+     *  largest target on ties. 'conservative' candidates retain the economical
+     *  estimate as a floor and also check longer time horizons, so their quote
+     *  cannot be lower. Return zero if no candidate gives a positive estimate.
      */
     virtual CFeeRate estimateSmartFee(int confTarget, FeeCalculation *feeCalc, bool conservative) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_cs_fee_estimator);
@@ -242,7 +195,7 @@ public:
     bool Read(AutoFile& filein)
         EXCLUSIVE_LOCKS_REQUIRED(!m_cs_fee_estimator);
 
-    /** Empty mempool transactions on shutdown to record failure to confirm for txs still in mempool */
+    /** End active observations as observation loss, preserving their established target outcomes. */
     void FlushUnconfirmed()
         EXCLUSIVE_LOCKS_REQUIRED(!m_cs_fee_estimator);
 
@@ -250,7 +203,7 @@ public:
     virtual unsigned int HighestTargetTracked(FeeEstimateHorizon horizon) const
         EXCLUSIVE_LOCKS_REQUIRED(!m_cs_fee_estimator);
 
-    /** Drop still unconfirmed transactions and record current estimations, if the fee estimation file is present. */
+    /** Drop still unconfirmed chunks and record current estimations, if the fee estimation file is present. */
     void Flush()
         EXCLUSIVE_LOCKS_REQUIRED(!m_cs_fee_estimator);
 
@@ -278,34 +231,30 @@ private:
     unsigned int historicalFirst GUARDED_BY(m_cs_fee_estimator){0};
     unsigned int historicalBest GUARDED_BY(m_cs_fee_estimator){0};
 
-    struct TxStatsInfo
+    struct ChunkStatsInfo
     {
-        unsigned int blockHeight{0};
-        unsigned int bucketIndex{0};
-        TxStatsInfo() = default;
+        unsigned int blockHeight;
+        unsigned int bucketIndex;
+        FeeFrac observed_fee_weight;
+        uint64_t observation_id;
     };
 
-    // map of txids to information about that transaction
-    std::map<Txid, TxStatsInfo> mapMemPoolTxs GUARDED_BY(m_cs_fee_estimator);
+    // Membership hash -> the economic configuration under observation.
+    std::map<uint256, ChunkStatsInfo> mapMemPoolChunks GUARDED_BY(m_cs_fee_estimator);
+    std::optional<uint64_t> m_last_sequence GUARDED_BY(m_cs_fee_estimator);
+    std::optional<unsigned int> m_observation_height GUARDED_BY(m_cs_fee_estimator);
+    std::array<uint64_t, NUM_CHUNK_END_REASONS> m_endings GUARDED_BY(m_cs_fee_estimator){};
+    uint64_t m_next_observation_id GUARDED_BY(m_cs_fee_estimator){0};
+    unsigned int m_resolved_height GUARDED_BY(m_cs_fee_estimator){0};
 
-    /** Classes to track historical data on transaction confirmations */
-    std::unique_ptr<TxConfirmStats> feeStats PT_GUARDED_BY(m_cs_fee_estimator);
-    std::unique_ptr<TxConfirmStats> shortStats PT_GUARDED_BY(m_cs_fee_estimator);
-    std::unique_ptr<TxConfirmStats> longStats PT_GUARDED_BY(m_cs_fee_estimator);
-
-    unsigned int trackedTxs GUARDED_BY(m_cs_fee_estimator){0};
-    unsigned int untrackedTxs GUARDED_BY(m_cs_fee_estimator){0};
+    /** Classes to track historical data on chunk confirmations */
+    std::unique_ptr<ChunkConfirmStats> feeStats PT_GUARDED_BY(m_cs_fee_estimator);
+    std::unique_ptr<ChunkConfirmStats> shortStats PT_GUARDED_BY(m_cs_fee_estimator);
+    std::unique_ptr<ChunkConfirmStats> longStats PT_GUARDED_BY(m_cs_fee_estimator);
 
     std::vector<double> buckets GUARDED_BY(m_cs_fee_estimator); // The upper-bound of the range for the bucket (inclusive)
     std::map<double, unsigned int> bucketMap GUARDED_BY(m_cs_fee_estimator); // Map of bucket upper-bound to index into all vectors by bucket
 
-    /** Process a transaction confirmed in a block*/
-    bool processBlockTx(unsigned int nBlockHeight, const RemovedMempoolTransactionInfo& tx) EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
-
-    /** Helper for estimateSmartFee */
-    double estimateCombinedFee(unsigned int confTarget, double successThreshold, bool checkShorterHorizon, EstimationResult *result) const EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
-    /** Helper for estimateSmartFee */
-    double estimateConservativeFee(unsigned int doubleTarget, EstimationResult *result) const EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
     /** Number of blocks of data recorded while fee estimates have been running */
     unsigned int BlockSpan() const EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
     /** Number of blocks of recorded fee estimate data represented in saved data file */
@@ -313,9 +262,11 @@ private:
     /** Calculation of highest target that reasonable estimate can be provided for */
     unsigned int MaxUsableEstimate() const EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
 
-    /** A non-thread-safe helper for the removeTx function */
-    bool _removeTx(const Txid& hash, bool inBlock)
-        EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
+    void ClearUnconfirmed() EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
+    void ResetHistory(unsigned int height) EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
+    void AdvanceClock(unsigned int height) EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
+    void StartChunk(const MemPoolChunk& chunk, unsigned int height) EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
+    bool EndChunk(const uint256& hash, MemPoolChunkEndReason outcome) EXCLUSIVE_LOCKS_REQUIRED(m_cs_fee_estimator);
 };
 
 class FeeFilterRounder

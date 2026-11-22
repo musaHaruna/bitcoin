@@ -8,20 +8,102 @@
 #include <consensus/amount.h>
 #include <consensus/validation.h>
 #include <core_memusage.h>
+#include <kernel/mempool_removal_reason.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <primitives/transaction.h>
 #include <txgraph.h>
+#include <uint256.h>
+#include <util/feefrac.h>
 #include <util/overflow.h>
 #include <util/time.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
+#include <optional>
 #include <set>
+#include <vector>
 
 class CBlockIndex;
+
+/** An owned chunk description that remains usable after its mempool entries are removed. */
+struct MemPoolChunk {
+    /** Total modified fee and sigops-adjusted weight of the chunk. */
+    FeeFrac m_fee_rate;
+    /** Membership hash derived from the sorted wtxids; does not include fees or observation time. */
+    uint256 m_chunk_hash;
+
+    /** Members have suitable admission context; no member of their cluster has a local fee delta. */
+    bool m_fee_estimation_eligible{false};
+    /** Diagnostic package size; the membership hash remains the identity. */
+    uint32_t m_member_count{1};
+
+    MemPoolChunk(FeeFrac fee_rate, uint256 chunk_hash, bool eligible = false, uint32_t members = 1)
+        : m_fee_rate{fee_rate}, m_chunk_hash{chunk_hash}, m_fee_estimation_eligible{eligible}, m_member_count{members} {}
+};
+
+/** Validation context captured while the mempool change is made. */
+struct MemPoolObservationContext {
+    unsigned int height;
+    bool chainstate_is_current{false};
+    bool bypass_limits{false};
+};
+
+/** Cause of a chunk transition, independent of transaction-removal reasons. */
+enum class MemPoolUpdateCause {
+    TRANSACTIONS,
+    REMOVAL,
+    BLOCK,
+    REORG,
+    PRIORITISATION,
+    REORDERING,
+};
+
+/**
+ * Owned descriptions of affected mempool chunks before and after an update.
+ *
+ * The vectors describe affected clusters and may overlap. They are sorted
+ * independently; their positions do not identify corresponding chunks.
+ * A chunk appearing in old_chunks does not establish that all of its
+ * transactions were removed or confirmed.
+ *
+ * These descriptions remain usable after the source mempool entries and
+ * cached graph references are removed.
+ */
+struct MemPoolChunksUpdate {
+    /** Chunks in the affected clusters before the update. */
+    std::vector<MemPoolChunk> old_chunks;
+    /** Chunks in the affected clusters after the update. */
+    std::vector<MemPoolChunk> new_chunks;
+    /** Classification of the update; producers must initialize this field. */
+    MemPoolRemovalReason reason;
+    /**
+     * Height of the connected block for a BLOCK update when supplied by
+     * validation; absent for other updates and callers without chain context.
+     * This is not the original transaction-entry height of new_chunks.
+     */
+    std::optional<unsigned int> block_height{std::nullopt};
+
+    /** Old chunks whose complete, exact wtxid membership occurs in this block. */
+    std::vector<uint256> fully_confirmed_chunks{};
+    /** Height when the resulting configuration became observable; absent if unknown. */
+    std::optional<unsigned int> observation_height{std::nullopt};
+    /** New observations also require this event-level freshness check. */
+    bool chainstate_is_current{false};
+    MemPoolUpdateCause cause{MemPoolUpdateCause::TRANSACTIONS};
+    /** Reorg boundary: discard pending observations; new_chunks is a full replacement snapshot. */
+    bool reset_observations{false};
+    /** Monotonic publication counter, separate from transaction/ZMQ sequence numbers. */
+    uint64_t sequence{0};
+    /** Per-old-chunk ending evidence. Block ambiguities can also name chunks
+     * unchanged by block removal (for example conflicts removed just afterward).
+     * Full inclusion above is independent of usability as a fee observation.
+     */
+    std::map<uint256, MemPoolChunkEndReason> ending_reasons{};
+};
 
 struct LockPoints {
     // Will be set to the blockchain height and median time past

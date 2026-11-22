@@ -88,8 +88,25 @@ def check_raw_estimates(node, fees_seen):
     """Call estimaterawfee and verify that the estimates meet certain invariants."""
 
     delta = 1.0e-6  # account for rounding error
+    available = 0
     for i in range(1, 26):
-        for _, e in node.estimaterawfee(i).items():
+        for horizon, e in node.estimaterawfee(i).items():
+            population = e["population"]
+            for bucket in (e[key] for key in ("population", "pass", "fail") if key in e):
+                assert abs(bucket["total"] - bucket["success"] - bucket["failure"] - bucket["unknown"]) < Decimal("1e-8")
+                assert abs(bucket["known_outcomes"] - bucket["success"] - bucket["failure"]) < Decimal("1e-8")
+                expected_ratio = bucket["success"] / bucket["known_outcomes"] if bucket["known_outcomes"] else 0
+                assert abs(bucket["known_success_ratio"] - expected_ratio) < Decimal("1e-8")
+                assert bucket["lower"] <= bucket["known_success_ratio"] <= bucket["upper"]
+            if "feerate" not in e:
+                # A range can have too few known outcomes or fail the success
+                # ratio among those outcomes. Unknown outcomes do not contribute.
+                assert "errors" in e
+                sufficient = Decimal("0.5") if horizon == "short" else Decimal("0.1")
+                assert population["known_outcomes"] < sufficient / (1 - e["decay"]) or e["fail"]["known_success_ratio"] < Decimal("0.95")
+                continue
+            available += 1
+            assert_greater_than_or_equal(e["pass"]["known_success_ratio"], Decimal("0.95"))
             feerate = float(e["feerate"])
             assert_greater_than(feerate, 0)
 
@@ -97,6 +114,8 @@ def check_raw_estimates(node, fees_seen):
                 raise AssertionError(
                     f"Estimated fee ({feerate}) out of range ({min(fees_seen)},{max(fees_seen)})"
                 )
+
+    assert_greater_than(available, 0)
 
 
 def check_smart_estimates(node, fees_seen):
@@ -513,12 +532,16 @@ class EstimateFeeTest(BitcoinTestFramework):
     def test_estimation_modes(self):
         low_feerate = Decimal("0.001")
         high_feerate = Decimal("0.005")
-        # Broadcast and mine high fee transactions for the first 12 blocks.
-        self.broadcast_and_maybe_mine(self.nodes[1], high_feerate, TXS_COUNT, 12, self.nodes[2])
+        # Build enough high-fee history to support all horizons.
+        self.broadcast_and_maybe_mine(self.nodes[1], high_feerate, TXS_COUNT, 36, self.nodes[2])
         check_fee_estimates_btw_modes(self.nodes[0], high_feerate, high_feerate)
-        # We now track 12 blocks; short horizon stats will start decaying.
-        # Broadcast and mine low fee transactions for the next 4 blocks.
-        self.broadcast_and_maybe_mine(self.nodes[1], low_feerate, TXS_COUNT, 4, self.nodes[2])
+        # One block of cheap confirmations immediately supports longer targets
+        # in the short horizon, without waiting for their deadlines.
+        self.broadcast_and_maybe_mine(self.nodes[1], low_feerate, TXS_COUNT, 1, self.nodes[2])
+        assert_equal(self.nodes[0].estimaterawfee(6)["short"]["feerate"], low_feerate)
+        # Four cheap batches still do not meet the long horizon's larger sample
+        # requirement, so conservative mode retains the expensive older quote.
+        self.broadcast_and_maybe_mine(self.nodes[1], low_feerate, TXS_COUNT, 3, self.nodes[2])
         # conservative mode will consider longer time horizons while economical mode does not
         # Check the fee estimates for both modes after mining low fee transactions.
         check_fee_estimates_btw_modes(self.nodes[0], high_feerate, low_feerate)

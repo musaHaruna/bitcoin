@@ -26,7 +26,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <map>
 #include <optional>
 #include <string>
@@ -159,12 +158,38 @@ static std::vector<RPCResult> FeeRateBucketDoc(bool elide = false)
     auto fields = std::vector<RPCResult>{
         {RPCResult::Type::NUM, "startrange", "start of feerate range"},
         {RPCResult::Type::NUM, "endrange", "end of feerate range"},
-        {RPCResult::Type::NUM, "withintarget", "number of txs over history horizon in the feerate range that were confirmed within target"},
-        {RPCResult::Type::NUM, "totalconfirmed", "number of txs over history horizon in the feerate range that were confirmed at any point"},
-        {RPCResult::Type::NUM, "inmempool", "current number of txs in mempool in the feerate range unconfirmed for at least target blocks"},
-        {RPCResult::Type::NUM, "leftmempool", "number of txs over history horizon in the feerate range that left mempool unconfirmed after target"},
+        {RPCResult::Type::NUM, "success", "decayed chunk observations confirmed by their target deadline"},
+        {RPCResult::Type::NUM, "failure", "decayed chunk observations known unconfirmed through their target deadline"},
+        {RPCResult::Type::NUM, "unknown", "decayed chunk observations whose target outcome is unknown; excluded from fee estimation"},
+        {RPCResult::Type::NUM, "total", "success + failure + unknown; confirmations enter immediately, other outcomes at their target deadline"},
+        {RPCResult::Type::NUM, "known_outcomes", "success + failure; the decayed observations used for estimation support"},
+        {RPCResult::Type::NUM, "known_success_ratio", "success / known_outcomes (0 if empty); the ratio compared with the threshold"},
+        {RPCResult::Type::NUM, "lower", "success / total (0 if empty); descriptive bound, not a confidence interval; not used for the threshold"},
+        {RPCResult::Type::NUM, "upper", "(success + unknown) / total (1 if empty); descriptive bound, not a confidence interval; not used for the threshold"},
+        {RPCResult::Type::OBJ_DYN, "unknown_reasons", "unknown weights by ending reason", {
+            {RPCResult::Type::NUM, "reason", "decayed unknown weight"},
+        }},
     };
     return elide ? ElideGroup(std::move(fields)) : fields;
+}
+
+static UniValue FeeRateBucketJSON(const EstimatorBucket& bucket)
+{
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("startrange", bucket.start);
+    result.pushKV("endrange", bucket.end);
+    result.pushKV("success", bucket.success);
+    result.pushKV("failure", bucket.failure);
+    result.pushKV("unknown", bucket.Unknown());
+    result.pushKV("total", bucket.Total());
+    result.pushKV("known_outcomes", bucket.Known());
+    result.pushKV("known_success_ratio", bucket.SuccessRatio());
+    result.pushKV("lower", bucket.Lower());
+    result.pushKV("upper", bucket.Upper());
+    UniValue reasons{UniValue::VOBJ};
+    for (size_t i{1}; i < NUM_CHUNK_END_REASONS; ++i) reasons.pushKV(StringForChunkEndReason(static_cast<MemPoolChunkEndReason>(i)), bucket.unknown[i]);
+    result.pushKV("unknown_reasons", std::move(reasons));
+    return result;
 }
 
 static std::vector<RPCResult> FeeEstimateHorizonDoc(bool elide = false)
@@ -173,6 +198,13 @@ static std::vector<RPCResult> FeeEstimateHorizonDoc(bool elide = false)
         {RPCResult::Type::NUM, "feerate", /*optional=*/true, "estimate fee rate in " + CURRENCY_UNIT + "/kvB"},
         {RPCResult::Type::NUM, "decay", "exponential decay (per block) for historical moving average of confirmation data"},
         {RPCResult::Type::NUM, "scale", "The resolution of confirmation targets at this time horizon"},
+        {RPCResult::Type::NUM, "target", "Effective target, rounded up to this horizon's resolution"},
+        {RPCResult::Type::NUM, "active_observations", "Currently tracked chunk observations, including immature ones"},
+        {RPCResult::Type::NUM, "cohort_heights", "Birth heights retained for unresolved future targets"},
+        {RPCResult::Type::OBJ_DYN, "endings", "Unweighted observation endings since process start, by reason", {
+            {RPCResult::Type::NUM, "reason", "number of endings"},
+        }},
+        {RPCResult::Type::OBJ, "population", "Recorded outcomes across all fee buckets", FeeRateBucketDoc()},
         {RPCResult::Type::OBJ, "pass", /*optional=*/true, "information about the lowest range of feerates to succeed in meeting the threshold", FeeRateBucketDoc()},
         {RPCResult::Type::OBJ, "fail", /*optional=*/true, "information about the highest range of feerates to fail to meet the threshold", FeeRateBucketDoc(/*elide=*/true)},
         {RPCResult::Type::ARR, "errors", /*optional=*/true, "Errors encountered during processing (if there are any)",
@@ -196,9 +228,9 @@ static RPCMethod estimaterawfee()
         "defined in BIP 141 (witness data is discounted).\n",
         {
             {"conf_target", RPCArg::Type::NUM, RPCArg::Optional::NO, "Confirmation target in blocks (1 - 1008)"},
-            {"threshold", RPCArg::Type::NUM, RPCArg::Default{0.95}, "The proportion of transactions in a given feerate range that must have been\n"
-            "confirmed within conf_target in order to consider those feerates as high enough and proceed to check\n"
-            "lower buckets."},
+            {"threshold", RPCArg::Type::NUM, RPCArg::Default{0.95}, "The minimum success / (success + failure) ratio required to consider those feerates\n"
+            "high enough and proceed to check lower buckets. Success means confirmation within conf_target.\n"
+            "Unknown outcomes are excluded from this ratio, the minimum sample support, and the estimated feerate."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "Results are returned for any horizon which tracks blocks up to the confirmation target",
@@ -238,20 +270,15 @@ static RPCMethod estimaterawfee()
                 feeRate = fee_estimator_man.BlockPolicyEstimateRawFee(conf_target, threshold, horizon, &buckets);
                 UniValue horizon_result(UniValue::VOBJ);
                 UniValue errors(UniValue::VARR);
-                UniValue passbucket(UniValue::VOBJ);
-                passbucket.pushKV("startrange", round(buckets.pass.start));
-                passbucket.pushKV("endrange", round(buckets.pass.end));
-                passbucket.pushKV("withintarget", round(buckets.pass.withinTarget * 100.0) / 100.0);
-                passbucket.pushKV("totalconfirmed", round(buckets.pass.totalConfirmed * 100.0) / 100.0);
-                passbucket.pushKV("inmempool", round(buckets.pass.inMempool * 100.0) / 100.0);
-                passbucket.pushKV("leftmempool", round(buckets.pass.leftMempool * 100.0) / 100.0);
-                UniValue failbucket(UniValue::VOBJ);
-                failbucket.pushKV("startrange", round(buckets.fail.start));
-                failbucket.pushKV("endrange", round(buckets.fail.end));
-                failbucket.pushKV("withintarget", round(buckets.fail.withinTarget * 100.0) / 100.0);
-                failbucket.pushKV("totalconfirmed", round(buckets.fail.totalConfirmed * 100.0) / 100.0);
-                failbucket.pushKV("inmempool", round(buckets.fail.inMempool * 100.0) / 100.0);
-                failbucket.pushKV("leftmempool", round(buckets.fail.leftMempool * 100.0) / 100.0);
+                UniValue passbucket = FeeRateBucketJSON(buckets.pass);
+                UniValue failbucket = FeeRateBucketJSON(buckets.fail);
+                horizon_result.pushKV("target", buckets.target);
+                horizon_result.pushKV("active_observations", uint64_t(buckets.active_observations));
+                horizon_result.pushKV("cohort_heights", uint64_t(buckets.cohort_heights));
+                horizon_result.pushKV("population", FeeRateBucketJSON(buckets.all));
+                UniValue endings{UniValue::VOBJ};
+                for (size_t i{0}; i < NUM_CHUNK_END_REASONS; ++i) endings.pushKV(StringForChunkEndReason(static_cast<MemPoolChunkEndReason>(i)), buckets.endings[i]);
+                horizon_result.pushKV("endings", std::move(endings));
 
                 // CFeeRate(0) is used to indicate error as a return value from estimateRawFee
                 if (feeRate != CFeeRate(0)) {

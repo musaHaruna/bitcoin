@@ -263,18 +263,20 @@ bool CheckSequenceLocksAtTip(CBlockIndex* tip,
     return EvaluateSequenceLocks(index, {lock_points.height, lock_points.time});
 }
 
-static void LimitMempoolSize(CTxMemPool& pool, CCoinsViewCache& coins_cache)
+static void LimitMempoolSize(CTxMemPool& pool, CCoinsViewCache& coins_cache, MemPoolObservationContext context)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main, pool.cs)
 {
     AssertLockHeld(::cs_main);
     AssertLockHeld(pool.cs);
-    int expired = pool.Expire(GetTime<std::chrono::seconds>() - pool.m_opts.expiry);
+    // Package processing can reach this function without accepting anything.
+    // Refresh eligibility context even when no admission updated the mempool.
+    int expired = pool.Expire(GetTime<std::chrono::seconds>() - pool.m_opts.expiry, context);
     if (expired != 0) {
         LogDebug(BCLog::MEMPOOL, "Expired %i transactions from the memory pool\n", expired);
     }
 
     std::vector<COutPoint> vNoSpendsRemaining;
-    pool.TrimToSize(pool.m_opts.max_size_bytes, &vNoSpendsRemaining);
+    pool.TrimToSize(pool.m_opts.max_size_bytes, &vNoSpendsRemaining, context);
     for (const COutPoint& removed : vNoSpendsRemaining)
         coins_cache.Uncache(removed);
 }
@@ -301,6 +303,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
     AssertLockHeld(cs_main);
     AssertLockHeld(m_mempool->cs);
+    m_mempool->BeginChunkReorg(static_cast<unsigned int>(Assert(m_chain.Tip())->nHeight));
     std::vector<Txid> vHashUpdate;
     {
         // disconnectpool is ordered so that the front is the most recently-confirmed
@@ -385,8 +388,13 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
     // We also need to remove any now-immature transactions
     m_mempool->removeForReorg(m_chain, filter_final_and_mature);
-    // Re-limit mempool size, in case we added any transactions
-    LimitMempoolSize(*m_mempool, this->CoinsTip());
+    // Reconcile owned publication records before checking memory limits, so
+    // snapshots of removed transactions cannot cause unnecessary evictions.
+    m_mempool->EndChunkReorg(MemPoolObservationContext{
+        static_cast<unsigned int>(m_chain.Height()), IsCurrentForFeeEstimation(*this), false});
+    // Re-limit mempool size, in case we added any transactions.
+    LimitMempoolSize(*m_mempool, this->CoinsTip(), MemPoolObservationContext{
+        static_cast<unsigned int>(m_chain.Height()), IsCurrentForFeeEstimation(*this), false});
 }
 
 /**
@@ -1223,7 +1231,9 @@ void MemPoolAccept::FinalizeSubpackage(const ATMPArgs& args)
         );
         m_subpackage.m_replaced_transactions.push_back(it->GetSharedTx());
     }
-    m_subpackage.m_changeset->Apply();
+    m_subpackage.m_changeset->Apply(MemPoolObservationContext{
+        static_cast<unsigned int>(m_active_chainstate.m_chain.Height()),
+        IsCurrentForFeeEstimation(m_active_chainstate), args.m_bypass_limits});
     m_subpackage.m_changeset.reset();
 }
 
@@ -1264,7 +1274,9 @@ bool MemPoolAccept::SubmitPackage(const ATMPArgs& args, std::vector<Workspace>& 
         // This code should be unreachable; it's here as belt-and-suspenders
         // to try to ensure we have no consensus-invalid transactions in the
         // mempool.
-        m_subpackage.m_changeset->Apply();
+        m_subpackage.m_changeset->Apply(MemPoolObservationContext{
+            static_cast<unsigned int>(m_active_chainstate.m_chain.Height()),
+            IsCurrentForFeeEstimation(m_active_chainstate), args.m_bypass_limits});
         m_subpackage.m_changeset.reset();
         return false;
     }
@@ -1384,7 +1396,8 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransactionInternal(const CTransa
 
     // Limit the mempool, if appropriate.
     if (!args.m_package_submission && !args.m_bypass_limits) {
-        LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip());
+        LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip(), MemPoolObservationContext{
+            static_cast<unsigned int>(m_active_chainstate.m_chain.Height()), IsCurrentForFeeEstimation(m_active_chainstate), false});
         // If mempool contents change, then the m_view cache is dirty. Given this isn't a package
         // submission, we won't be using the cache anymore, but clear it anyway for clarity.
         CleanupTemporaryCoins();
@@ -1718,7 +1731,8 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
     // Make sure we haven't exceeded max mempool size.
     // Package transactions that were submitted to mempool or already in mempool may be evicted.
     // If mempool contents change, then the m_view cache is dirty. It has already been cleared above.
-    LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip());
+    LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip(), MemPoolObservationContext{
+        static_cast<unsigned int>(m_active_chainstate.m_chain.Height()), IsCurrentForFeeEstimation(m_active_chainstate), false});
 
     for (const auto& tx : package) {
         const auto& wtxid = tx->GetWitnessHash();
@@ -3051,6 +3065,9 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         return false;
     }
 
+    if (m_mempool) {
+        m_mempool->BeginChunkReorg(static_cast<unsigned int>(pindexDelete->pprev->nHeight));
+    }
     if (disconnectpool && m_mempool) {
         // Save transactions to re-add to mempool at end of reorg. If any entries are evicted for
         // exceeding memory limits, remove them and their descendants from the mempool.
@@ -3152,7 +3169,8 @@ bool Chainstate::ConnectTip(
     // Remove conflicting transactions from the mempool.
     std::vector<RemovedMempoolTransactionInfo> txs_removed_for_block;
     if (m_mempool) {
-        txs_removed_for_block = m_mempool->removeForBlock(block_to_connect->vtx);
+        txs_removed_for_block = m_mempool->removeForBlock(block_to_connect->vtx, MemPoolObservationContext{
+            static_cast<unsigned int>(pindexNew->nHeight), IsCurrentForFeeEstimation(*this), false});
         disconnectpool.removeForBlock(block_to_connect->vtx);
     }
     // Update m_chain & related variables.

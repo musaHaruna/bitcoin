@@ -8,11 +8,13 @@
 #include <crypto/common.h>
 #include <crypto/siphash.h>
 #include <primitives/transaction.h>
+#include <primitives/transaction_identifier.h>
 #include <uint256.h>
 
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <vector>
 
 class SaltedUint256Hasher
 {
@@ -115,5 +117,17 @@ public:
 
     size_t operator()(const std::span<const unsigned char>& script) const;
 };
+
+/**
+ * Compute a single SHA256 hash of concatenated wtxids.
+ *
+ * Sort the wtxids in ascending numeric order, interpreting their stored
+ * bytes as little-endian numbers. Serialize each wtxid in its original
+ * byte order, without a count prefix.
+ *
+ * Duplicate wtxids are preserved. The vector is taken by value so the
+ * function can sort its own copy, or accept a moved vector.
+ */
+uint256 GetHashFromWitnesses(std::vector<Wtxid> wtxids);
 
 #endif // BITCOIN_UTIL_HASHER_H

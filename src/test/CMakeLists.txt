@@ -26,6 +26,7 @@ add_executable(test_bitcoin
   blockfilter_tests.cpp
   blockmanager_tests.cpp
   blockpolicyestimator_tests.cpp
+  chunkconfirmstats_tests.cpp
   bloom_tests.cpp
   bswap_tests.cpp
   btcsignals_tests.cpp
@@ -61,6 +62,7 @@ add_executable(test_bitcoin
   key_tests.cpp
   logging_tests.cpp
   mempool_tests.cpp
+  mempool_update_tests.cpp
   mempool_fee_estimator_tests.cpp
   merkle_tests.cpp
   merkleblock_tests.cpp
